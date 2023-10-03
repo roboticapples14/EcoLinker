@@ -13,7 +13,7 @@ With EcoScape, we've dramatically improved the time it takes to run these models
 	- Input: 
 		○ Species habitat
 		○ Terrain geotiff
-		○ Dollar amount available for restoration
+		○ Dollar amount available for restoration (or num of pixels to convert)
 		○ N x N Matrix representing cost required to convert terrain of type i to terrain type j
 		○ (potentially connectivity + flow layers)
 		○ (potentially type of terrain to restore to)
