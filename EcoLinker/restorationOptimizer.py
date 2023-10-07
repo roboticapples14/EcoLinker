@@ -74,6 +74,20 @@ class restorationOptimizer():
         tif = GeoTiff.from_file(filename)
         return tif
 
+    def get_highest_death_pixels(self, death_tif):
+        death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
+        flat_indices = np.argpartition(death_matrix.ravel(), -self.pixels)[-self.pixels:]
+        row_indices, col_indices = np.unravel_index(flat_indices, death_matrix.shape)
+
+        min_elements = death_matrix[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_death = {}
+        for i in range(self.pixels - 1, 0, -1):
+            highest_death[(col_indices[i], row_indices[i])] = death_matrix[row_indices[i]][col_indices[i]]
+        
+        return highest_death
 
     def sum_of_connectivity(self):
         raw_connectivity = self.connectivity_geotiff.get_all_as_tile().m
