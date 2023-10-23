@@ -6,11 +6,15 @@ from scgt import GeoTiff, Tile, Reader
 Suite of tools for finding best pixels to restore in order to maximize habitat connectivity
 '''
 class restorationOptimizer():
-    def __init__(self, habitat_fn, terrain_fn, connectivity_fn, flow_fn, permeability_dict, pixels):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels):
         self.habitat_fn = habitat_fn
         self.terrain_fn = terrain_fn
+        self.restored_terr_fn = restored_terr_fn
         self.connectivity_fn = connectivity_fn
         self.flow_fn = flow_fn
+        self.restored_connectivity_fn = restored_connectivity_fn
+        self.restored_flow_fn = restored_flow_fn
+        self.death_fn = death_fn
         self.permeability_dict = ecoscape_connectivity.util.read_transmission_csv(permeability_dict)
         self.pixels = pixels
 
@@ -83,7 +87,8 @@ class restorationOptimizer():
         return tif
 
     '''
-    get the top n pixels with highest death, meaning the pixels where most birds die 
+    get the top n pixels with highest death, meaning the pixels where most birds die
+    :returns: list of pixels formatted (col,row)
     '''
     def get_highest_death_pixels(self, death_tif, n=None):
         if (n == None):
@@ -105,21 +110,44 @@ class restorationOptimizer():
     '''
     get the sum of connectivity
     '''
-    def sum_of_connectivity(self):
-        with GeoTiff.from_file(self.connectivity_fn) as connectivity_geotiff:
-            raw_connectivity = connectivity_geotiff.get_all_as_tile().m
-        return np.sum(raw_connectivity)
+    def sum_of_tif(self, tif_fn):
+        with GeoTiff.from_file(tif_fn) as geotiff:
+            np_tif = geotiff.get_all_as_tile().m
+        return np.sum(np_tif)
 
     def get_most_permiable_terrain(self):
         sorted_permiability = sorted(self.permeability_dict.items(), key=lambda x:x[1], reverse=True)
         return sorted_permiability[0][0]
 
-    def change_terrain(self, x, y, terrain_type=None):
+    def change_terrain(self, x, y, ter_fn=None, terrain_type=None):
         if terrain_type == None:
             terrain_type = self.get_most_permiable_terrain()
+        if ter_fn==None:
+            ter_fn=self.restored_terr_fn
 
-        with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:        
+        with GeoTiff.from_file(self.restored_terr_fn) as terrain_geotiff:        
             m = np.array([[[terrain_type]]])
             tile = Tile(1, 1, 0, 0, x, y, m)
             terrain_geotiff.set_tile(tile)
 
+    def restore_pixels(self, n=None, verbose=True):
+        current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        death_tif = self.get_death_layer(self.death_fn)
+        highest_death = self.get_highest_death_pixels(death_tif, n)
+
+        for x, y in highest_death.keys():
+            self.change_terrain(x, y)
+
+            if (verbose):
+                with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
+                    old_permiability = terrain_geotiff.get_pixel_value(x, y)
+                with GeoTiff.from_file(self.restored_terr_fn) as terrain_geotiff:
+                    new_permiability = terrain_geotiff.get_pixel_value(x, y)
+                print(f'Restoring pixel ({x}, {y}) from permiability {self.permeability_dict[old_permiability]} to {self.permeability_dict[new_permiability]}')
+            
+        
+        # for x, y in highest_death.keys():
+        #     self.change_terrain(x, y)
