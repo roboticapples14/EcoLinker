@@ -93,6 +93,7 @@ class restorationOptimizer():
     def get_highest_death_pixels(self, death_tif, n=None):
         if (n == None):
             n = self.pixels
+            print("changing n")
         death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
         flat_indices = np.argpartition(death_matrix.ravel(), -self.pixels)[-self.pixels:]
         row_indices, col_indices = np.unravel_index(flat_indices, death_matrix.shape)
@@ -102,8 +103,8 @@ class restorationOptimizer():
         row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
 
         highest_death = {}
-        for i in range(self.pixels - 1, 0, -1):
-            highest_death[(col_indices[i], row_indices[i])] = death_matrix[row_indices[i]][col_indices[i]]
+        for i in range(n, 0, -1):
+            highest_death[(col_indices[i-1], row_indices[i-1])] = death_matrix[row_indices[i-1]][col_indices[i-1]]
         
         return highest_death
 
@@ -119,18 +120,23 @@ class restorationOptimizer():
         sorted_permiability = sorted(self.permeability_dict.items(), key=lambda x:x[1], reverse=True)
         return sorted_permiability[0][0]
 
-    def change_terrain(self, x, y, ter_fn=None, terrain_type=None):
+    def change_terrain(self, x, y, ter_fn=None, terrain_type=None, verbose=False):
         if terrain_type == None:
             terrain_type = self.get_most_permiable_terrain()
         if ter_fn==None:
             ter_fn=self.restored_terr_fn
 
-        with GeoTiff.from_file(self.restored_terr_fn) as terrain_geotiff:        
+        with GeoTiff.from_file(ter_fn) as terrain_geotiff:
             m = np.array([[[terrain_type]]])
-            tile = Tile(1, 1, 0, 0, x, y, m)
+            tile = Tile(1, 1, 0, 1, x, y, m)
             terrain_geotiff.set_tile(tile)
+        
+        if (verbose):
+            with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
+                old_terrain = terrain_geotiff.get_pixel_value(x, y)
+            print(f'Restoring pixel ({x}, {y}) from permiability {self.permeability_dict[old_terrain]} to {self.permeability_dict[terrain_type]}')
 
-    def restore_pixels(self, n=None, verbose=True):
+    def restore_pixels(self, n=None, verbose=False):
         current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
         with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
             restored_terr.set_tile(current_terr_tile)
@@ -139,15 +145,4 @@ class restorationOptimizer():
         highest_death = self.get_highest_death_pixels(death_tif, n)
 
         for x, y in highest_death.keys():
-            self.change_terrain(x, y)
-
-            if (verbose):
-                with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
-                    old_permiability = terrain_geotiff.get_pixel_value(x, y)
-                with GeoTiff.from_file(self.restored_terr_fn) as terrain_geotiff:
-                    new_permiability = terrain_geotiff.get_pixel_value(x, y)
-                print(f'Restoring pixel ({x}, {y}) from permiability {self.permeability_dict[old_permiability]} to {self.permeability_dict[new_permiability]}')
-            
-        
-        # for x, y in highest_death.keys():
-        #     self.change_terrain(x, y)
+            self.change_terrain(x, y, verbose=verbose)
