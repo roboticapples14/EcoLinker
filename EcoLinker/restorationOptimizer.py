@@ -93,7 +93,6 @@ class restorationOptimizer():
     def get_highest_death_pixels(self, death_tif, n=None):
         if (n == None):
             n = self.pixels
-            print("changing n")
         death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
         flat_indices = np.argpartition(death_matrix.ravel(), -self.pixels)[-self.pixels:]
         row_indices, col_indices = np.unravel_index(flat_indices, death_matrix.shape)
@@ -105,6 +104,47 @@ class restorationOptimizer():
         highest_death = {}
         for i in range(n, 0, -1):
             highest_death[(col_indices[i-1], row_indices[i-1])] = death_matrix[row_indices[i-1]][col_indices[i-1]]
+        
+        return highest_death
+
+    '''
+    returns a cluster of n connected pixels with highest death
+    :returns: list of pixels formatted (col,row)
+    '''
+    def get_highest_death_pixels_island(self, death_tif, n=None):
+        if (n == None):
+            n = self.pixels
+        death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
+
+        pixels = []
+        maxPixels = []
+        def dfs(i,j):
+            if (i < 0 or i >= len(death_matrix) or j < 0 or j >= len(death_matrix[0]) or death_matrix[i][j] == 0):
+                return 0
+            death = death_matrix[i][j]
+            death_matrix[i][j] = 0
+            pixels.append((i,j))
+            return death + dfs(i+1, j) + dfs(i-1, j) + dfs(i, j+1) + dfs(i, j-1)
+
+        maxDeath = 0
+        currDeath = 0
+        for i in range(len(death_matrix)):
+            for j in range(len(death_matrix[0])):
+                if (death_matrix[i][j] == 1):
+                    currDeath = dfs(i, j)
+                    if (currDeath > maxDeath):
+                        print(f'currDeath: {currDeath}')
+                        print(f'current pixels: {maxPixels}')
+                        print(f'new max Death: {maxDeath}')
+                        print(f'new max pixels: {pixels}')
+                        maxDeath = currDeath
+                        maxPixels = pixels
+                pixels = []
+        return (maxPixels, maxDeath)
+
+
+        # uses DP or Kadane’s algorithm to find maximum contiguous subarray/area
+
         
         return highest_death
 
