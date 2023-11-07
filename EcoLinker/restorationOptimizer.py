@@ -18,6 +18,16 @@ class restorationOptimizer():
         self.permeability_dict = ecoscape_connectivity.util.read_transmission_csv(permeability_dict)
         self.pixels = pixels
 
+    '''
+    Adds randomness to all low transmission values for more death exploration
+    '''
+    def randomize_transmission_dict(self):
+        with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
+            raw_terrain = terrain_geotiff.get_all_as_tile().m
+            terrain_codes = np.unique(raw_terrain)
+        for i in terrain_codes:
+            if i not in self.permeability_dict.keys() or self.permeability_dict[i] == 0.0:
+                self.permeability_dict[i] = np.random.random()/20
     
     def get_big_tile_reader(self, tif, width, height):
         reader = tif.get_reader(b=0, w=width, h=height)
