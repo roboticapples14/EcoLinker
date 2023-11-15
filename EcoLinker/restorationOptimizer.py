@@ -8,7 +8,7 @@ from ecoscape_connectivity_local import repopulation
 Suite of tools for finding best pixels to restore in order to maximize habitat connectivity
 '''
 class restorationOptimizer():
-    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, terrain_noise=False):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels):
         self.habitat_fn = habitat_fn
         self.terrain_fn = terrain_fn
         self.restored_terr_fn = restored_terr_fn
@@ -20,14 +20,15 @@ class restorationOptimizer():
         self.highest_death = None
         self.pixels = pixels
         self.permeability_dict = ecoscape_connectivity.util.read_transmission_csv(permeability_dict)
-        if terrain_noise:
-            self.randomize_transmission_dict()
 
     '''
-    Runs connectivity based on noisy terrain
+    Runs connectivity for either true or restored terrain
     '''
-    def run_connectivity(self, single_tile=True, deterministic=True):
-        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, single_tile=single_tile, deterministic=deterministic)
+    def run_connectivity(self, single_tile=True, deterministic=True, restored=False):
+        if (restored):
+            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, single_tile=single_tile, deterministic=deterministic)
+        else:
+            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, single_tile=single_tile, deterministic=deterministic)
 
     '''
     Get the change in connectivity before and after restoration
@@ -64,12 +65,15 @@ class restorationOptimizer():
     Death is dq/dp * (1 - p), which calculates the number of birds who died attempting to disperse through this pixel
     :param death_tif: filename of death geotiff
     '''
-    def get_death_layer(self, filename=None):
-        if (filename == None):
-            filename = self.death_fn
+    def get_death_layer(self, death_fn=None, flow_fn=None):
+        if (death_fn == None):
+            death_fn = self.death_fn
+        if (flow_fn == None):
+            flow_fn = self.flow_fn
+
         with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
             raw_terrain = terrain_geotiff.get_all_as_tile().m
-        with GeoTiff.from_file(self.flow_fn) as flow_geotiff:
+        with GeoTiff.from_file(flow_fn) as flow_geotiff:
             raw_flow = flow_geotiff.get_all_as_tile().m.astype('float64')
         
         permeability = ecoscape_connectivity.util.dict_translate(raw_terrain, self.permeability_dict)
@@ -79,12 +83,12 @@ class restorationOptimizer():
         norm_death = np.clip(np.log10(1. + death) * 20., 0, 255).astype(np.uint8)
 
         with GeoTiff.from_file(self.connectivity_fn) as connectivity_geotiff:
-            connectivity_geotiff.clone_shape(filename)
-        with GeoTiff.from_file(filename) as death_geotiff:
+            connectivity_geotiff.clone_shape(death_fn)
+        with GeoTiff.from_file(death_fn) as death_geotiff:
             tile = Tile(death_geotiff.width, death_geotiff.height, 0, 0, 0, 0, norm_death)
             death_geotiff.set_tile(tile)
         
-        tif = GeoTiff.from_file(filename)
+        tif = GeoTiff.from_file(death_fn)
         return tif
 
     '''
@@ -98,7 +102,7 @@ class restorationOptimizer():
         if (death_tif == None):
             death_tif = self.death_fn
         death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
-        flat_indices = np.argpartition(death_matrix.ravel(), -self.pixels)[-self.pixels:]
+        flat_indices = np.argpartition(death_matrix.ravel(), -n)[-n:]
         row_indices, col_indices = np.unravel_index(flat_indices, death_matrix.shape)
 
         min_elements = death_matrix[row_indices, col_indices]
@@ -157,14 +161,15 @@ class restorationOptimizer():
     :param x: col value of pixel coordinate to change
     :param y: row value of pixel coordinate to change
     :param ter_fn: terrain file name, or self.terrain if None
+    :param flow_fn: flow filename to calculate the death layer
     :param verbose: Prints the terrain code and permiability of the changed pixel before and after change
     '''
-    def restore_pixels(self, n=None, terrain_type=None, verbose=False):
+    def restore_pixels(self, n=None, terrain_type=None, flow_fn=None, verbose=False):
         current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
         with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
             restored_terr.set_tile(current_terr_tile)
 
-        death_tif = self.get_death_layer(self.death_fn)
+        death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn)
         highest_death = self.get_highest_death_pixels(death_tif, n)
 
         for x, y in highest_death.keys():
@@ -175,10 +180,11 @@ class restorationOptimizer():
         return reader
 
 '''
-Death based restoration
+Defecit based restoration
 '''
 class defecitRestoration(restorationOptimizer):
     '''
+    Runs restore_pixels, which computes the death layer and then restores the n highest death pixels 
     :param n: number of highest death pixels to restore
     :param terrain_type: terrain type to restore to
     :param verbose: print terrain conversion of every pixel
@@ -186,9 +192,25 @@ class defecitRestoration(restorationOptimizer):
     def restore(self, n=None, terrain_type=None, verbose=False):
         if (n==None):
             n = self.pixels
-        self.restore_pixels(n, terrain_type, verbose)
+        self.restore_pixels(n=n, terrain_type=terrain_type, verbose=verbose)
 
+
+'''
+Noisy defecit restoration:
+    1. Compute connectivity with unaltered permiability dict for baseline comparison
+    2. Add noise to permiability dict
+    3. Recompute connectivity with noisy permiability dict
+    4. Get death layer (noise exposes where might potentially be good terrain)
+    5. Perform restoration based on noisy death layer
+    6. Compute connectivity with og permiability again to observe the change in connectivity before and after noisy restoration
+'''
 class noisyDefecitRestoration(restorationOptimizer):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, noisy_connectivity_fn, noisy_flow_fn, rand_divisor=75):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+        self.noisy_connectivity_fn = noisy_connectivity_fn
+        self.noisy_flow_fn = noisy_flow_fn
+        self.noisy_permeability_dict = self.get_noisy_transmission_dict(random_divisor=rand_divisor)
+
     '''
     :param n: number of highest death pixels to restore
     :param terrain_type: terrain type to restore to
@@ -197,14 +219,13 @@ class noisyDefecitRestoration(restorationOptimizer):
     def restore(self, n=None, terrain_type=None, verbose=False):
         if (n==None):
             n = self.pixels
-        self.restore_pixels(n)
+        self.restore_pixels(n, flow_fn=self.noisy_flow_fn)
 
     '''
-    Adds noise to transmission raster then runs connectivity based on noisy terrain
+    Adds noise to transmission raster then runs connectivity based on noisy terrain permiability
     '''
-    def run_connectivity(self, single_tile=True, deterministic=True):
-        noisy_transmission = self.get_noisy_transmission_dict()
-        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, noisy_transmission, single_tile=single_tile, deterministic=deterministic)
+    def run_noisy_connectivity(self, single_tile=True, deterministic=True):
+        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.noisy_connectivity_fn, self.noisy_flow_fn, self.noisy_permeability_dict, single_tile=single_tile, deterministic=deterministic)
     
     '''
     Adds randomness to all low transmission values for more death exploration
@@ -217,7 +238,7 @@ class noisyDefecitRestoration(restorationOptimizer):
             terrain_codes = np.unique(raw_terrain)
         for i in terrain_codes:
             if i not in noisy_transmission.keys() or noisy_transmission[i] == 0.0:
-                noisy_transmission[i] = np.random.random() / 75
+                noisy_transmission[i] = np.random.random() / random_divisor
         return noisy_transmission
 
 '''
