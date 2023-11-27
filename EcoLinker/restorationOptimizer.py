@@ -118,6 +118,20 @@ class restorationOptimizer():
         return highest_death
 
     '''
+    Find highest cluster of n pixels in matrix tif
+    '''
+    def greedy_search(self, tif, n):
+        pass
+        # highest_death = self.get_highest_death_pixels(n=1).keys()
+        # raw_matrix = tif.get_all_as_tile().m.squeeze(0)
+
+        # for col, row in highest_death.items():
+
+
+    def lower_res_tif(self, matrix, rows, cols):
+        return matrix.reshape(rows, matrix.shape[0]/rows, cols, matrix.shape[1]/cols).sum(axis=1).sum(axis=2)
+
+    '''
     Gets the sum of the given geotiff (for calculating the sum of connectivity to compare across restorations, for instance)
     :param tif_fn: filename of geotiff to get sum of
     '''
@@ -148,14 +162,17 @@ class restorationOptimizer():
             ter_fn=self.restored_terr_fn
 
         with GeoTiff.from_file(ter_fn) as terrain_geotiff:
+            old_terrain = terrain_geotiff.get_pixel_value(x, y)
+
             m = np.array([[[terrain_type]]])
             tile = Tile(1, 1, 0, 1, x, y, m)
             terrain_geotiff.set_tile(tile)
         
         if (verbose):
-            with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
-                old_terrain = terrain_geotiff.get_pixel_value(x, y)
             print(f'Restoring pixel ({x}, {y}) from permiability {self.permeability_dict[old_terrain]} to {self.permeability_dict[terrain_type]}')
+
+        permiability_change = self.permeability_dict[terrain_type] - self.permeability_dict[old_terrain]
+        return permiability_change
 
     '''
     Restores n pixels with highest death to terrain of terrain_type
@@ -173,8 +190,10 @@ class restorationOptimizer():
         death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn)
         highest_death = self.get_highest_death_pixels(death_tif, n)
 
+        permiability_change = 0 
         for x, y in highest_death.keys():
-            self.change_terrain(x, y, terrain_type, verbose=verbose)
+            permiability_change += self.change_terrain(x, y, terrain_type, verbose=verbose)
+        return permiability_change
 
     def get_big_tile_reader(self, tif, width, height):
         reader = tif.get_reader(b=0, w=width, h=height)
@@ -223,7 +242,8 @@ class defecitRestoration(restorationOptimizer):
     def restore(self, n=None, terrain_type=None, verbose=False):
         if (n==None):
             n = self.pixels
-        self.restore_pixels(n=n, terrain_type=terrain_type, verbose=verbose)
+        permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, verbose=verbose)
+        return permiability_restored
 
 
 '''
@@ -250,7 +270,8 @@ class noisyDefecitRestoration(restorationOptimizer):
     def restore(self, n=None, terrain_type=None, verbose=False):
         if (n==None):
             n = self.pixels
-        self.restore_pixels(n, flow_fn=self.noisy_flow_fn)
+        permiability_restored = self.restore_pixels(n, flow_fn=self.noisy_flow_fn)
+        return permiability_restored
 
     '''
     Adds noise to transmission raster then runs connectivity based on noisy terrain permiability
@@ -312,15 +333,16 @@ class utopianRestoration(restorationOptimizer):
         highest_diff = self.get_highest_diff_pixels(diff, n)
         print(highest_diff)
 
+        permiability_change = 0
         for x, y in highest_diff.keys():
-            self.change_terrain(x, y, terrain_type, verbose=verbose)
+            permiability_change += self.change_terrain(x, y, terrain_type, verbose=verbose)
+
+        return permiability_change
 
     '''
     Adds noise to transmission raster then runs connectivity based on noisy terrain permiability
     '''
     def run_utopian_connectivity(self, single_tile=True, deterministic=True):
-        print(f"run utopian connectivity with permiability: {self.utopian_permeability_dict}")
-
         repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.utopian_connectivity_fn, self.utopian_flow_fn, self.utopian_permeability_dict, single_tile=single_tile, deterministic=deterministic)
     
     '''
@@ -364,8 +386,20 @@ class utopianRestoration(restorationOptimizer):
         row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
 
         highest_diff = {}
-        for i in range(n, 0, -1):
-            highest_diff[(col_indices[i-1], row_indices[i-1])] = diff[row_indices[i-1]][col_indices[i-1]]
+        with GeoTiff.from_file(self.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m
+            raw_hab = raw_hab.squeeze(0)
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m
+            raw_terrain = raw_terrain.squeeze(0)
+
+        i = n
+        while (len(highest_diff.items()) < n and i >= 0):
+            terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+            permiability = self.permeability_dict[terrain]
+            if permiability < 1:
+                highest_diff[(col_indices[i-1], row_indices[i-1])] = diff[row_indices[i-1]][col_indices[i-1]]
+            i -= 1
         
         return highest_diff
 
