@@ -24,12 +24,11 @@ class restorationOptimizer():
     '''
     Runs connectivity for either true or restored terrain
     '''
-    def run_connectivity(self, single_tile=True, deterministic=True, restored=False):
-        print(f"run regular connectivity with permiability: {self.permeability_dict}")
+    def run_connectivity(self, single_tile=True, deterministic=True, restored=False, hop_length=1):
         if (restored):
-            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, single_tile=single_tile, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, single_tile=single_tile, gap_crossing=hop_length, deterministic=deterministic)
         else:
-            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, single_tile=single_tile, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, single_tile=single_tile, gap_crossing=hop_length, deterministic=deterministic)
 
     '''
     Get the change in connectivity before and after restoration
@@ -200,12 +199,14 @@ class restorationOptimizer():
         return reader
 
     # paint the changed terrain pixels with death values
-    def paint_changed_terrain_geotiff(self, changed_terrain_fn):
+    def paint_changed_terrain_geotiff(self, changed_terrain_fn, changed_pixels=None):
+        if (changed_pixels == None):
+            changed_pixels = self.highest_death
         with GeoTiff.from_file(self.connectivity_fn) as connectivity_tif:
             connectivity_tif.clone_shape(changed_terrain_fn)
 
         with GeoTiff.from_file(changed_terrain_fn) as changed_terrain_tif:
-            for (x,y), death in self.highest_death.items():
+            for (x,y), death in changed_pixels.items():
                     m = np.array([[[death]]])
                     tile = Tile(1, 1, 0, 1, x, y, m)
                     changed_terrain_tif.set_tile(tile)
@@ -228,6 +229,26 @@ class restorationOptimizer():
         # write the tile to connectivity diff tif
         with GeoTiff.from_file(connectivity_diff_fn) as connectivity_diff:
             connectivity_diff.set_tile(diff)
+
+    '''
+    Draw the permiability of terrain to a geotiff filename
+    '''
+    def get_permiability_matrix(self):
+        with GeoTiff.from_file(self.terrain_fn) as ter:
+            ter_tile = ter.get_all_as_tile()
+            permiability_mat = np.vectorize(self.permeability_dict.get)(ter_tile.m)
+            return permiability_mat
+
+    '''
+    Draw the permiability of terrain to a geotiff filename
+    '''
+    def draw_permiability_tiff(self, filename):
+        permiability_mat = self.get_permiability_matrix()
+        with GeoTiff.from_file(self.terrain_fn) as ter:
+            ter_tile = ter.get_all_as_tile()
+            permiability_tile = Tile(ter_tile.w, ter_tile.h, ter_tile.b, ter_tile.c, ter_tile.x, ter_tile.y, permiability_mat)
+            with ter.clone_shape(filename, dtype='float32') as perm:
+                perm.set_tile(permiability_tile)
 
 '''
 Defecit based restoration
@@ -319,7 +340,7 @@ class utopianRestoration(restorationOptimizer):
     :param terrain_type: terrain type to restore to
     :param verbose: print terrain conversion of every pixel
     '''
-    def restore(self, n=None, terrain_type=None, verbose=False):
+    def restore(self, n=None, terrain_type=None, verbose=False, weighted=False):
         if (n==None):
             n = self.pixels
 
@@ -327,8 +348,7 @@ class utopianRestoration(restorationOptimizer):
         with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
             restored_terr.set_tile(current_terr_tile)
 
-        diff = self.get_flow_diff()
-
+        diff = self.get_flow_diff() if (not weighted) else self.get_flow_diff_weighted_by_permiability()
 
         highest_diff = self.get_highest_diff_pixels(diff, n)
         print(highest_diff)
@@ -363,14 +383,39 @@ class utopianRestoration(restorationOptimizer):
     '''
     def get_flow_diff(self):
         with GeoTiff.from_file(self.flow_fn) as flow:
-            raw_flow = flow.get_all_as_tile().m
+            raw_flow = flow.get_all_as_tile().m.astype(np.int16)
         with GeoTiff.from_file(self.utopian_flow_fn) as utopian_flow:
-            raw_utopian_flow = utopian_flow.get_all_as_tile().m
+            raw_utopian_flow = utopian_flow.get_all_as_tile().m.astype(np.int16)
         
         return raw_utopian_flow - raw_flow
 
     '''
-    Gets n pixels with the highest difference in flow, with permiability <
+    Calculates difference btw utopian and regular flow, weighted by permiability inversed
+    '''
+    def get_flow_diff_weighted_by_permiability(self):
+        with GeoTiff.from_file(self.flow_fn) as flow:
+            raw_flow = flow.get_all_as_tile().m.astype(np.int16)
+        with GeoTiff.from_file(self.utopian_flow_fn) as utopian_flow:
+            raw_utopian_flow = utopian_flow.get_all_as_tile().m.astype(np.int16)
+
+        diff = raw_utopian_flow - raw_flow
+        permiability = self.get_permiability_matrix()
+        permiability_inversed = np.ones_like(permiability) - (permiability)**2
+        diff_weighted = diff * permiability_inversed
+        return diff_weighted
+
+    '''
+    Draw the difference between utopian flow and actual flow to a geotiff filename
+    '''
+    def draw_flow_diff_tif(self, filename):
+        with GeoTiff.from_file(self.flow_fn) as flow:
+            flow_tile = flow.get_all_as_tile()
+            with flow.clone_shape(filename, dtype='int32') as diff:
+                diff_flow = Tile(flow_tile.w, flow_tile.h, flow_tile.b, flow_tile.c, flow_tile.x, flow_tile.y, self.get_flow_diff())
+                diff.set_tile(diff_flow)
+
+    '''
+    Gets n pixels with the highest difference in flow, with permiability < 1
     :param diff: difference np matrix
     :returns: dict of highest diff pixels formatted {(col,row): death}
     '''
@@ -386,9 +431,6 @@ class utopianRestoration(restorationOptimizer):
         row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
 
         highest_diff = {}
-        with GeoTiff.from_file(self.habitat_fn) as hab:
-            raw_hab = hab.get_all_as_tile().m
-            raw_hab = raw_hab.squeeze(0)
         with GeoTiff.from_file(self.terrain_fn) as terr:
             raw_terrain = terr.get_all_as_tile().m
             raw_terrain = raw_terrain.squeeze(0)
