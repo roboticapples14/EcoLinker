@@ -82,8 +82,8 @@ class restorationOptimizer():
         death = np.multiply(sensitivity, inverse_permeability)
         norm_death = np.clip(np.log10(1. + death) * 20., 0, 255).astype(np.uint8)
 
-        with GeoTiff.from_file(self.connectivity_fn) as connectivity_geotiff:
-            connectivity_geotiff.clone_shape(death_fn)
+        with GeoTiff.from_file(self.connectivity_fn) as flow_geotiff:
+            flow_geotiff.clone_shape(death_fn)
         with GeoTiff.from_file(death_fn) as death_geotiff:
             tile = Tile(death_geotiff.width, death_geotiff.height, 0, 0, 0, 0, norm_death)
             death_geotiff.set_tile(tile)
@@ -117,18 +117,30 @@ class restorationOptimizer():
         return highest_death
 
     '''
-    Find highest cluster of n pixels in matrix tif
+    takes a np matrix and shrinks it to the resolution given, making each pixel the sum of the constituting pixels
     '''
-    def greedy_search(self, tif, n):
-        pass
-        # highest_death = self.get_highest_death_pixels(n=1).keys()
-        # raw_matrix = tif.get_all_as_tile().m.squeeze(0)
+    def lower_res_matrix(self, matrix, rows=None, cols=None, rscale=None, cscale=None):
+        r, c = matrix.shape
+        if rscale and cscale:
+            return matrix.reshape(r//rscale, rscale, c//cscale, cscale).sum(axis=1).sum(axis=2)
+        if rows and cols:
+            return matrix.reshape(rows, matrix.shape[0]//rows, cols, matrix.shape[1]//cols).sum(axis=1).sum(axis=2)
 
-        # for col, row in highest_death.items():
-
-
-    def lower_res_tif(self, matrix, rows, cols):
-        return matrix.reshape(rows, matrix.shape[0]/rows, cols, matrix.shape[1]/cols).sum(axis=1).sum(axis=2)
+    '''
+    Scales the geotiff data in tif_fn to resolution constituting of pixels of row_pixels x col_pixels, writing scaled tif to scaled_tif_fn
+    param row_pixels: number of pixels to combine to 1 pixel on y axis (divisible by tif_fn's height)
+    param col_pixels: number of pixels to combine to 1 pixel on x axis (divisible by tif_fn's width)
+    '''
+    def scale_geotiff(self, tif_fn, scaled_tif_fn, row_pixels, col_pixels):
+        with GeoTiff.from_file(tif_fn) as tif:
+            mat = tif.get_all_as_tile().m.squeeze(0)
+            scaled_mat = self.lower_res_matrix(mat, rscale=row_pixels, cscale=col_pixels)
+            scaled_tile = Tile(scaled_mat.shape[1], scaled_mat.shape[0], 0, 1, 0, 0, np.expand_dims(scaled_mat, 0))
+            profile = tif.profile
+            profile['width'] = scaled_mat.shape[1]
+            profile['height'] = scaled_mat.shape[0]
+            with tif.copy_to_new_file(scaled_tif_fn, profile) as scaled_tif:
+                scaled_tif.set_tile(scaled_tile)
 
     '''
     Gets the sum of the given geotiff (for calculating the sum of connectivity to compare across restorations, for instance)
@@ -351,6 +363,7 @@ class utopianRestoration(restorationOptimizer):
         diff = self.get_flow_diff() if (not weighted) else self.get_flow_diff_weighted_by_permiability()
 
         highest_diff = self.get_highest_diff_pixels(diff, n)
+        self.highest_death = highest_diff
         print(highest_diff)
 
         permiability_change = 0
@@ -453,9 +466,35 @@ class flipRestoration(restorationOptimizer):
         pass
 
 '''
-Flip one permeability in every dxd square, measure increased flow
-At lower resolution
+Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
+* Attempting to focus more on corridors/clusters
+    1. Compute connectivity
+    2. Scale down the connectivity and flow tifs
+        a. scale to pixels of size i x j, where i x j = N
+        b. Size of area to restore
+    3. Scale terrain geotiff:
+        a. to take the value of the most frequent terrain type
+        b. to be the average terrain value, creating a new permiability dict that's the average permiability of all pixels
+    5. Find highest defecit pixel(s)
+    5. Restore region/corridor
+    6. Compute connectivity with og inputs again to observe:
+        a. change in sum of connectivity
+        b. change in sum of connectivity / restored permiability
 '''
-class lowResFlipRestoration(restorationOptimizer):
+class lowResDefecitRestoration(restorationOptimizer):
     def flip_restoration_lower_res(self):
+        def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, low_res_connectivity_fn, low_res_flow_fn, low_res_terrain_fn, permiability=0.9):
+            super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+            self.low_res_connectivity_fn = low_res_connectivity_fn
+            self.low_res_flow_fn = low_res_flow_fn
+            self.low_res_terrain_fn = low_res_terrain_fn
+            
+    '''
+    Scale terrain down to scale of all others
+    Either:
+    a. to take the value of the most frequent terrain type
+    b. to be the average terrain value, creating a new permiability dict that's the average permiability of all pixels
+    '''
+    def scale_terrain_tif(self):
+
         pass
