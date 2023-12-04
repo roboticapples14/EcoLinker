@@ -17,18 +17,19 @@ class restorationOptimizer():
         self.restored_connectivity_fn = restored_connectivity_fn
         self.restored_flow_fn = restored_flow_fn
         self.death_fn = death_fn
-        self.highest_death = None
+        self.changed_pixels = None
         self.pixels = pixels
         self.permeability_dict = ecoscape_connectivity.util.read_transmission_csv(permeability_dict)
 
     '''
     Runs connectivity for either true or restored terrain
+    TODO: num_gaps=20
     '''
     def run_connectivity(self, single_tile=True, deterministic=True, restored=False, hop_length=1):
         if (restored):
-            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, single_tile=single_tile, gap_crossing=hop_length, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, num_gaps=20, single_tile=single_tile, gap_crossing=hop_length, deterministic=deterministic)
         else:
-            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, single_tile=single_tile, gap_crossing=hop_length, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, num_gaps=20, single_tile=single_tile, gap_crossing=hop_length, deterministic=deterministic)
 
     '''
     Get the change in connectivity before and after restoration
@@ -49,11 +50,11 @@ class restorationOptimizer():
 
     '''
     Get the efficency of restoration, measured as the ratio of gained connectivity per unit of death restored
-    :param restored_pixels: list of the death of restored pixels, uses highest_death's death values if None
+    :param restored_pixels: list of the death of restored pixels, uses changed_pixels's death values if None
     '''
     def get_restoration_efficency(self, restored_pixels=None):
         if restored_pixels == None:
-            restored_pixels = self.highest_death.values()
+            restored_pixels = self.changed_pixels.values()
         delta_conn = self.get_delta_connectivity()
         death_sum = 0
         for i in restored_pixels:
@@ -112,8 +113,7 @@ class restorationOptimizer():
         highest_death = {}
         for i in range(n, 0, -1):
             highest_death[(col_indices[i-1], row_indices[i-1])] = death_matrix[row_indices[i-1]][col_indices[i-1]]
-        
-        self.highest_death = highest_death
+
         return highest_death
 
     '''
@@ -200,6 +200,7 @@ class restorationOptimizer():
 
         death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn)
         highest_death = self.get_highest_death_pixels(death_tif, n)
+        self.changed_pixels = highest_death
 
         permiability_change = 0 
         for x, y in highest_death.keys():
@@ -213,7 +214,7 @@ class restorationOptimizer():
     # paint the changed terrain pixels with death values
     def paint_changed_terrain_geotiff(self, changed_terrain_fn, changed_pixels=None):
         if (changed_pixels == None):
-            changed_pixels = self.highest_death
+            changed_pixels = self.changed_pixels
         with GeoTiff.from_file(self.connectivity_fn) as connectivity_tif:
             connectivity_tif.clone_shape(changed_terrain_fn)
 
@@ -262,8 +263,35 @@ class restorationOptimizer():
             with ter.clone_shape(filename, dtype='float32') as perm:
                 perm.set_tile(permiability_tile)
 
+    '''
+    Draw the resistance of terrain to a geotiff filename
+    '''
+    def get_resistance_matrix(self):
+        with GeoTiff.from_file(self.terrain_fn) as ter:
+            ter_tile = ter.get_all_as_tile()
+            ter_mat = ter_tile.m
+            u,inv = np.unique(ter_mat,return_inverse = True)
+            return np.array([(self.permeability_dict.get(x, 0)) for x in u])[inv].reshape(ter_mat.shape)
+
+    '''
+    Draw the resistance of terrain to a geotiff filename
+    '''
+    def draw_resistance_tiff(self, filename):
+        resistance_mat = self.get_resistance_matrix()
+        with GeoTiff.from_file(self.terrain_fn) as ter:
+            ter_tile = ter.get_all_as_tile()
+            permiability_tile = Tile(ter_tile.w, ter_tile.h, ter_tile.b, ter_tile.c, ter_tile.x, ter_tile.y, resistance_mat)
+            with ter.clone_shape(filename, dtype='float32') as perm:
+                perm.set_tile(permiability_tile)
+
 '''
 Defecit based restoration
+    1. Compute connectivity to get gradient, and for baseline comparison
+    2. Calculate death layer from gradient
+    3. Get n pixels with highest death
+    4. Restore each of those pixels to higher permiability terrain
+    5. Compute connectivity with restored terrain
+    6. Evaluate the ratio between change in connectivity and restored permiability
 '''
 class defecitRestoration(restorationOptimizer):
     '''
@@ -278,6 +306,48 @@ class defecitRestoration(restorationOptimizer):
         permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, verbose=verbose)
         return permiability_restored
 
+'''
+Problem: death-based approach favors the edges of the habitat, where many birds die due to unfavorable terrain. This death is not the kind that we want to reduce, because there’s no chance of them jumping to another habitat patch if the death were prevented, thus not increasing connectivity well.
+However, when more pixels are being restored, we start to see more interior “corridor” pixels being chosen (see defecit_50 vs defecit_500, where 50 and 500 correspond to the number of restored pixels, the red px are restored pixels, and the heatmap is the increased connectivity)
+Solution: Instead of restoring the n highest death pixels, sample n pixels with a likelihood proportional to their death, in order to allow some more interior pixels to be restored
+'''
+class probalisticDeficitRestoration(restorationOptimizer):
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+        permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, verbose=verbose)
+        return permiability_restored
+
+    '''
+    Restores n pixels probalisticly sampled based on death to terrain of terrain_type
+    :param x: col value of pixel coordinate to change
+    :param y: row value of pixel coordinate to change
+    :param ter_fn: terrain file name, or self.terrain if None
+    :param flow_fn: flow filename to calculate the death layer
+    :param verbose: Prints the terrain code and permiability of the changed pixel before and after change
+    '''
+    def restore_pixels(self, n=None, terrain_type=None, flow_fn=None, verbose=False):
+        current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn)
+        death_mat = death_tif.get_all_as_tile().m
+        i, rows, cols = death_mat.shape
+        # cast death_mat to 1d to use numpy.random.choice with p for weights by values
+        death_mat_probs = np.cbrt(death_mat.ravel())
+        death_mat_probs = np.divide(death_mat_probs, np.sum(death_mat_probs))
+        # sample indexes from range of probs, with no replacement and weighted by probs
+        death_indices = np.random.choice(np.arange(death_mat_probs.size), size=n, replace=False, p=death_mat_probs)
+        permiability_change = 0
+        changed_pixels = {}
+        for index in death_indices:
+            x, y = index // cols, index % cols # col, row
+            changed_pixels[(y,x)] = death_mat[0][x][y]
+            permiability_change += self.change_terrain(y, x, terrain_type, verbose=verbose)
+
+        self.changed_pixels = changed_pixels
+        return permiability_change
 
 '''
 Noisy defecit restoration:
@@ -363,8 +433,7 @@ class utopianRestoration(restorationOptimizer):
         diff = self.get_flow_diff() if (not weighted) else self.get_flow_diff_weighted_by_permiability()
 
         highest_diff = self.get_highest_diff_pixels(diff, n)
-        self.highest_death = highest_diff
-        print(highest_diff)
+        self.changed_pixels = highest_diff
 
         permiability_change = 0
         for x, y in highest_diff.keys():
@@ -459,13 +528,6 @@ class utopianRestoration(restorationOptimizer):
         return highest_diff
 
 '''
-Flip one permeability in every dxd square, measure increased flow
-'''
-class flipRestoration(restorationOptimizer):
-    def flip_restoration(self):
-        pass
-
-'''
 Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
 * Attempting to focus more on corridors/clusters
     1. Compute connectivity
@@ -482,7 +544,7 @@ Performs defecit restoration based on lower resolution terrain, scaling the pixe
         b. change in sum of connectivity / restored permiability
 '''
 class lowResDefecitRestoration(restorationOptimizer):
-    def flip_restoration_lower_res(self):
+    def deficit_restoration_lower_res(self):
         def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, low_res_connectivity_fn, low_res_flow_fn, low_res_terrain_fn, permiability=0.9):
             super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
             self.low_res_connectivity_fn = low_res_connectivity_fn
