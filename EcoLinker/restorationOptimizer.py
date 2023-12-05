@@ -1,5 +1,6 @@
 import ecoscape_connectivity
 import numpy as np
+import math
 from scgt import GeoTiff, Tile
 from ecoscape_connectivity_local import repopulation
 
@@ -66,11 +67,13 @@ class restorationOptimizer():
     Death is dq/dp * (1 - p), which calculates the number of birds who died attempting to disperse through this pixel
     :param death_tif: filename of death geotiff
     '''
-    def get_death_layer(self, death_fn=None, flow_fn=None):
+    def get_death_layer(self, death_fn=None, flow_fn=None, terrain_fn=None):
         if (death_fn == None):
             death_fn = self.death_fn
         if (flow_fn == None):
             flow_fn = self.flow_fn
+        if (terrain_fn == None):
+            terrain_fn = self.terrain_fn
 
         with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
             raw_terrain = terrain_geotiff.get_all_as_tile().m
@@ -119,22 +122,20 @@ class restorationOptimizer():
     '''
     takes a np matrix and shrinks it to the resolution given, making each pixel the sum of the constituting pixels
     '''
-    def lower_res_matrix(self, matrix, rows=None, cols=None, rscale=None, cscale=None):
+    def lower_res_matrix(self, matrix, rscale, cscale, average=False):
         r, c = matrix.shape
-        if rscale and cscale:
-            return matrix.reshape(r//rscale, rscale, c//cscale, cscale).sum(axis=1).sum(axis=2)
-        if rows and cols:
-            return matrix.reshape(rows, matrix.shape[0]//rows, cols, matrix.shape[1]//cols).sum(axis=1).sum(axis=2)
+        dividend = (rscale * cscale) if average else 1
+        return matrix.reshape(r//rscale, rscale, c//cscale, cscale).sum(axis=1).sum(axis=2) / dividend
 
     '''
     Scales the geotiff data in tif_fn to resolution constituting of pixels of row_pixels x col_pixels, writing scaled tif to scaled_tif_fn
     param row_pixels: number of pixels to combine to 1 pixel on y axis (divisible by tif_fn's height)
     param col_pixels: number of pixels to combine to 1 pixel on x axis (divisible by tif_fn's width)
     '''
-    def scale_geotiff(self, tif_fn, scaled_tif_fn, row_pixels, col_pixels):
+    def scale_geotiff(self, tif_fn, scaled_tif_fn, row_pixels, col_pixels, average=False):
         with GeoTiff.from_file(tif_fn) as tif:
             mat = tif.get_all_as_tile().m.squeeze(0)
-            scaled_mat = self.lower_res_matrix(mat, rscale=row_pixels, cscale=col_pixels)
+            scaled_mat = self.lower_res_matrix(mat, rscale=row_pixels, cscale=col_pixels, average=average)
             scaled_tile = Tile(scaled_mat.shape[1], scaled_mat.shape[0], 0, 1, 0, 0, np.expand_dims(scaled_mat, 0))
             profile = tif.profile
             profile['width'] = scaled_mat.shape[1]
@@ -193,17 +194,21 @@ class restorationOptimizer():
     :param flow_fn: flow filename to calculate the death layer
     :param verbose: Prints the terrain code and permiability of the changed pixel before and after change
     '''
-    def restore_pixels(self, n=None, terrain_type=None, flow_fn=None, verbose=False):
-        current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
+    def restore_pixels(self, n=None, terrain_type=None, flow_fn=None, terrain_fn=None, restored_terrain_fn=None, verbose=False):
+        terrain_fn = terrain_fn if terrain_fn else self.terrain_fn
+        restored_terrain_fn = restored_terrain_fn if restored_terrain_fn else self.restored_terr_fn
+
+        current_terr_tile = GeoTiff.from_file(terrain_fn).get_all_as_tile()
         with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
             restored_terr.set_tile(current_terr_tile)
 
-        death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn)
+        death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn, terrain_fn=terrain_fn)
         highest_death = self.get_highest_death_pixels(death_tif, n)
         self.changed_pixels = highest_death
 
         permiability_change = 0 
         for x, y in highest_death.keys():
+            print(f'x: {x}, y: {y}: {highest_death[(x,y)]}')
             permiability_change += self.change_terrain(x, y, terrain_type, verbose=verbose)
         return permiability_change
 
@@ -266,8 +271,10 @@ class restorationOptimizer():
     '''
     Draw the resistance of terrain to a geotiff filename
     '''
-    def get_resistance_matrix(self):
-        with GeoTiff.from_file(self.terrain_fn) as ter:
+    def get_resistance_matrix(self, terrain_fn=None):
+        if (terrain_fn == None):
+            terrain = self.terrain_fn
+        with GeoTiff.from_file(terrain) as ter:
             ter_tile = ter.get_all_as_tile()
             ter_mat = ter_tile.m
             u,inv = np.unique(ter_mat,return_inverse = True)
@@ -531,32 +538,157 @@ class utopianRestoration(restorationOptimizer):
 Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
 * Attempting to focus more on corridors/clusters
     1. Compute connectivity
-    2. Scale down the connectivity and flow tifs
-        a. scale to pixels of size i x j, where i x j = N
-        b. Size of area to restore
-    3. Scale terrain geotiff:
-        a. to take the value of the most frequent terrain type
-        b. to be the average terrain value, creating a new permiability dict that's the average permiability of all pixels
-    5. Find highest defecit pixel(s)
-    5. Restore region/corridor
-    6. Compute connectivity with og inputs again to observe:
-        a. change in sum of connectivity
-        b. change in sum of connectivity / restored permiability
+    2. Compute death
+    3. Scale down death tif
+    4. Calculate highest death on low-res death tif
+    5. Restore_pixels should take the low-res high death pixels and restore that region on OG terrain
+    6. Rerun connectivity w/ restored terrain
 '''
 class lowResDefecitRestoration(restorationOptimizer):
-    def deficit_restoration_lower_res(self):
-        def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, low_res_connectivity_fn, low_res_flow_fn, low_res_terrain_fn, permiability=0.9):
-            super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
-            self.low_res_connectivity_fn = low_res_connectivity_fn
-            self.low_res_flow_fn = low_res_flow_fn
-            self.low_res_terrain_fn = low_res_terrain_fn
-            
-    '''
-    Scale terrain down to scale of all others
-    Either:
-    a. to take the value of the most frequent terrain type
-    b. to be the average terrain value, creating a new permiability dict that's the average permiability of all pixels
-    '''
-    def scale_terrain_tif(self):
+    def __init__(self, 
+                habitat_fn, 
+                terrain_fn, 
+                restored_terr_fn, 
+                connectivity_fn, 
+                restored_connectivity_fn,
+                flow_fn, 
+                restored_flow_fn, 
+                death_fn, 
+                scaled_death_fn,
+                permeability_dict, 
+                rscale, cscale,
+                pixels):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+        self.scaled_death_fn = scaled_death_fn
+        self.rscale = rscale
+        self.cscale = cscale
 
-        pass
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+        permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, flow_fn=self.flow_fn, terrain_fn=self.terrain_fn, restored_terrain_fn=self.restored_terr_fn, verbose=verbose)
+        return permiability_restored
+
+    '''
+    Restores n pixels
+    :param x: col value of pixel coordinate to change
+    :param y: row value of pixel coordinate to change
+    :param ter_fn: terrain file name, or self.terrain if None
+    :param flow_fn: flow filename to calculate the death layer
+    :param verbose: Prints the terrain code and permiability of the changed pixel before and after change
+    '''
+    def restore_pixels(self, n=None, terrain_type=None, flow_fn=None, terrain_fn=None, restored_terrain_fn=None, verbose=False):
+        terrain_fn = terrain_fn if terrain_fn else self.terrain_fn
+        restored_terrain_fn = restored_terrain_fn if restored_terrain_fn else self.restored_terr_fn
+
+        current_terr_tile = GeoTiff.from_file(terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn, terrain_fn=terrain_fn)
+        death_mat = death_tif.get_all_as_tile().m
+
+        self.scale_geotiff(self.death_fn, self.scaled_death_fn, row_pixels=self.rscale, col_pixels=self.cscale)
+
+        scaled_death_tif = GeoTiff.from_file(self.scaled_death_fn)
+
+        highest_death = self.get_highest_death_pixels(scaled_death_tif, math.ceil(n/(self.rscale * self.cscale)))
+
+        changed_pixels = {}
+        print(highest_death)
+
+        permiability_change = 0 
+        for x, y in highest_death.keys():
+            for i in range(x * self.rscale, x * self.rscale + self.rscale):
+                for j in range(y * self.cscale, y * self.cscale + self.cscale):
+                    print(f'x: {i}, y: {j}: {death_mat[0][j][i]}')
+                    permiability_change += self.change_terrain(i, j, terrain_type, verbose=verbose)
+                    changed_pixels[(i,j)] = death_mat[0][j][i]
+
+        self.changed_pixels = changed_pixels
+
+        return permiability_change
+
+'''
+Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
+* Attempting to focus more on corridors/clusters
+    1. Compute connectivity
+    2. Compute death
+    3. Scale down death tif
+    4. Calculate highest death on low-res death tif
+    5. Restore_pixels should take the low-res high death pixels and restore that region on OG terrain
+    6. Rerun connectivity w/ restored terrain
+'''
+class lowResProbablisticDefecitRestoration(restorationOptimizer):
+    def __init__(self, 
+                habitat_fn, 
+                terrain_fn, 
+                restored_terr_fn, 
+                connectivity_fn, 
+                restored_connectivity_fn,
+                flow_fn, 
+                restored_flow_fn, 
+                death_fn, 
+                scaled_death_fn,
+                permeability_dict, 
+                rscale, cscale,
+                pixels):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+        self.scaled_death_fn = scaled_death_fn
+        self.rscale = rscale
+        self.cscale = cscale
+
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+        permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, flow_fn=self.flow_fn, terrain_fn=self.terrain_fn, restored_terrain_fn=self.restored_terr_fn, verbose=verbose)
+        return permiability_restored
+
+    '''
+    Restores n pixels
+    :param x: col value of pixel coordinate to change
+    :param y: row value of pixel coordinate to change
+    :param ter_fn: terrain file name, or self.terrain if None
+    :param flow_fn: flow filename to calculate the death layer
+    :param verbose: Prints the terrain code and permiability of the changed pixel before and after change
+    '''
+    def restore_pixels(self, n=None, terrain_type=None, flow_fn=None, terrain_fn=None, restored_terrain_fn=None, verbose=False):
+        terrain_fn = terrain_fn if terrain_fn else self.terrain_fn
+        restored_terrain_fn = restored_terrain_fn if restored_terrain_fn else self.restored_terr_fn
+
+        current_terr_tile = GeoTiff.from_file(terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn, terrain_fn=terrain_fn)
+        death_mat = death_tif.get_all_as_tile().m
+
+        self.scale_geotiff(self.death_fn, self.scaled_death_fn, row_pixels=self.rscale, col_pixels=self.cscale)
+
+        scaled_death_tif = GeoTiff.from_file(self.scaled_death_fn)
+        scaled_death_mat = scaled_death_tif.get_all_as_tile().m
+        _, rows, cols = scaled_death_mat.shape
+
+        # cast death_mat to 1d to use numpy.random.choice with p for weights by values
+        death_mat_probs = np.cbrt(scaled_death_mat.ravel())
+        death_mat_probs = np.divide(death_mat_probs, np.sum(death_mat_probs))
+        # sample indexes from range of probs, with no replacement and weighted by probs
+        death_indices = np.random.choice(np.arange(death_mat_probs.size), size=math.ceil(n/(self.rscale * self.cscale)), replace=False, p=death_mat_probs)
+        changed_pixels = {}
+        permiability_change = 0 
+
+        print(death_indices)
+
+        for index in death_indices:
+            x, y = index // cols, index % cols # col, row
+            print(f'x: {x}, y: {y}: {scaled_death_mat[0][x][y]}')
+
+            for i in range(x * self.rscale, x * self.rscale + self.rscale):
+                for j in range(y * self.cscale, y * self.cscale + self.cscale):
+                    permiability_change += self.change_terrain(i, j, terrain_type, verbose=verbose)
+                    print(f'x: {i}, y: {j}: {death_mat[0][i][j]}')
+                    changed_pixels[(i,j)] = death_mat[0][i][j]
+
+        self.changed_pixels = changed_pixels
+
+        return permiability_change
