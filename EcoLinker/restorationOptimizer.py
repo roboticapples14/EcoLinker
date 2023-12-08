@@ -173,7 +173,11 @@ class restorationOptimizer():
         if ter_fn==None:
             ter_fn=self.restored_terr_fn
 
+        print(f'x: {x}, y: {y}')
+
         with GeoTiff.from_file(ter_fn) as terrain_geotiff:
+            print(f'terrain_geotiff.height: {terrain_geotiff.height}')
+            print(f'terrain_geotiff.width: {terrain_geotiff.width}')
             old_terrain = terrain_geotiff.get_pixel_value(x, y)
 
             m = np.array([[[terrain_type]]])
@@ -595,13 +599,11 @@ class lowResDefecitRestoration(restorationOptimizer):
         highest_death = self.get_highest_death_pixels(scaled_death_tif, math.ceil(n/(self.rscale * self.cscale)))
 
         changed_pixels = {}
-        print(highest_death)
 
         permiability_change = 0 
         for x, y in highest_death.keys():
             for i in range(x * self.rscale, x * self.rscale + self.rscale):
                 for j in range(y * self.cscale, y * self.cscale + self.cscale):
-                    print(f'x: {i}, y: {j}: {death_mat[0][j][i]}')
                     permiability_change += self.change_terrain(i, j, terrain_type, verbose=verbose)
                     changed_pixels[(i,j)] = death_mat[0][j][i]
 
@@ -685,6 +687,8 @@ class lowResProbablisticDefecitRestoration(restorationOptimizer):
 
             for i in range(x * self.rscale, x * self.rscale + self.rscale):
                 for j in range(y * self.cscale, y * self.cscale + self.cscale):
+                    print(f'i: {i}, j: {j}: {death_mat[0][i][j]}')
+
                     permiability_change += self.change_terrain(i, j, terrain_type, verbose=verbose)
                     print(f'x: {i}, y: {j}: {death_mat[0][i][j]}')
                     changed_pixels[(i,j)] = death_mat[0][i][j]
