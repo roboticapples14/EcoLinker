@@ -9,7 +9,7 @@ from ecoscape_connectivity_local import repopulation
 Suite of tools for finding best pixels to restore in order to maximize habitat connectivity
 '''
 class restorationOptimizer():
-    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable=[]):
         self.habitat_fn = habitat_fn
         self.terrain_fn = terrain_fn
         self.restored_terr_fn = restored_terr_fn
@@ -21,6 +21,9 @@ class restorationOptimizer():
         self.changed_pixels = None
         self.pixels = pixels
         self.permeability_dict = ecoscape_connectivity.util.read_transmission_csv(permeability_dict)
+        self.unrestorable = unrestorable
+
+        print(unrestorable)
 
     '''
     Runs connectivity for either true or restored terrain
@@ -173,12 +176,12 @@ class restorationOptimizer():
         if ter_fn==None:
             ter_fn=self.restored_terr_fn
 
-        print(f'x: {x}, y: {y}')
-
         with GeoTiff.from_file(ter_fn) as terrain_geotiff:
-            print(f'terrain_geotiff.height: {terrain_geotiff.height}')
-            print(f'terrain_geotiff.width: {terrain_geotiff.width}')
             old_terrain = terrain_geotiff.get_pixel_value(x, y)
+            print(f'old_terrain: {old_terrain}')
+            if old_terrain in self.unrestorable:
+                print(f'Cannot restore: {old_terrain}')
+                return False
 
             m = np.array([[[terrain_type]]])
             tile = Tile(1, 1, 0, 1, x, y, m)
@@ -213,7 +216,11 @@ class restorationOptimizer():
         permiability_change = 0 
         for x, y in highest_death.keys():
             print(f'x: {x}, y: {y}: {highest_death[(x,y)]}')
-            permiability_change += self.change_terrain(x, y, terrain_type, verbose=verbose)
+            change = self.change_terrain(x, y, terrain_type, verbose=verbose)
+            if change is None:
+                self.changed_pixels.pop((x,y))
+            else:
+                permiability_change += change
         return permiability_change
 
     def get_big_tile_reader(self, tif, width, height):
@@ -354,7 +361,14 @@ class probalisticDeficitRestoration(restorationOptimizer):
         changed_pixels = {}
         for index in death_indices:
             x, y = index // cols, index % cols # col, row
-            changed_pixels[(y,x)] = death_mat[0][x][y]
+
+            change = self.change_terrain(x, y, terrain_type, verbose=verbose)
+            if change is None:
+                death_indices.pop(index)
+            else:
+                permiability_change += change
+                changed_pixels[(y,x)] = death_mat[0][x][y]
+
             permiability_change += self.change_terrain(y, x, terrain_type, verbose=verbose)
 
         self.changed_pixels = changed_pixels
@@ -604,8 +618,10 @@ class lowResDefecitRestoration(restorationOptimizer):
         for x, y in highest_death.keys():
             for i in range(x * self.rscale, x * self.rscale + self.rscale):
                 for j in range(y * self.cscale, y * self.cscale + self.cscale):
-                    permiability_change += self.change_terrain(i, j, terrain_type, verbose=verbose)
-                    changed_pixels[(i,j)] = death_mat[0][j][i]
+                    change = self.change_terrain(i,j, terrain_type, verbose=verbose)
+                    if change is not None:
+                        permiability_change += change
+                        changed_pixels[(i,j)] = death_mat[0][j][i]
 
         self.changed_pixels = changed_pixels
 
@@ -687,11 +703,11 @@ class lowResProbablisticDefecitRestoration(restorationOptimizer):
 
             for i in range(x * self.rscale, x * self.rscale + self.rscale):
                 for j in range(y * self.cscale, y * self.cscale + self.cscale):
-                    print(f'i: {i}, j: {j}: {death_mat[0][i][j]}')
 
-                    permiability_change += self.change_terrain(i, j, terrain_type, verbose=verbose)
-                    print(f'x: {i}, y: {j}: {death_mat[0][i][j]}')
-                    changed_pixels[(i,j)] = death_mat[0][i][j]
+                    change = self.change_terrain(i,j, terrain_type, verbose=verbose)
+                    if change is not None:
+                        permiability_change += change
+                        changed_pixels[(i,j)] = death_mat[0][i][j]
 
         self.changed_pixels = changed_pixels
 
