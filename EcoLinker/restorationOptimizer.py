@@ -9,7 +9,7 @@ from ecoscape_connectivity_local import repopulation
 Suite of tools for finding best pixels to restore in order to maximize habitat connectivity
 '''
 class restorationOptimizer():
-    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable=[]):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[]):
         self.habitat_fn = habitat_fn
         self.terrain_fn = terrain_fn
         self.restored_terr_fn = restored_terr_fn
@@ -21,9 +21,8 @@ class restorationOptimizer():
         self.changed_pixels = None
         self.pixels = pixels
         self.permeability_dict = ecoscape_connectivity.util.read_transmission_csv(permeability_dict)
-        self.unrestorable = unrestorable
-
-        print(unrestorable)
+        self.unrestorable_terrain = unrestorable_terrain
+        self.unrestorable_matrix = unrestorable_matrix
 
     '''
     Runs connectivity for either true or restored terrain
@@ -171,6 +170,11 @@ class restorationOptimizer():
     :param verbose: Prints the terrain code and permiability of the changed pixel before and after change
     '''
     def change_terrain(self, x, y, ter_fn=None, terrain_type=None, verbose=False):
+        if self.unrestorable_matrix is not None:
+            if self.unrestorable_matrix[y][x] == 1:
+                # print(f'Cannot restore pixels ({x}, {y})')
+                return False
+        
         if terrain_type == None:
             terrain_type = self.get_most_permiable_terrain()
         if ter_fn==None:
@@ -178,9 +182,8 @@ class restorationOptimizer():
 
         with GeoTiff.from_file(ter_fn) as terrain_geotiff:
             old_terrain = terrain_geotiff.get_pixel_value(x, y)
-            print(f'old_terrain: {old_terrain}')
-            if old_terrain in self.unrestorable:
-                print(f'Cannot restore: {old_terrain}')
+            if old_terrain in self.unrestorable_terrain:
+                # print(f'Cannot restore terrain type: {old_terrain}')
                 return False
 
             m = np.array([[[terrain_type]]])
@@ -211,13 +214,12 @@ class restorationOptimizer():
 
         death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn, terrain_fn=terrain_fn)
         highest_death = self.get_highest_death_pixels(death_tif, n)
-        self.changed_pixels = highest_death
+        self.changed_pixels = highest_death.copy()
 
         permiability_change = 0 
         for x, y in highest_death.keys():
-            print(f'x: {x}, y: {y}: {highest_death[(x,y)]}')
             change = self.change_terrain(x, y, terrain_type, verbose=verbose)
-            if change is None:
+            if change == False:
                 self.changed_pixels.pop((x,y))
             else:
                 permiability_change += change
@@ -360,16 +362,14 @@ class probalisticDeficitRestoration(restorationOptimizer):
         permiability_change = 0
         changed_pixels = {}
         for index in death_indices:
-            x, y = index // cols, index % cols # col, row
+            y, x = index // cols, index % cols # row, col
 
             change = self.change_terrain(x, y, terrain_type, verbose=verbose)
             if change is None:
                 death_indices.pop(index)
             else:
                 permiability_change += change
-                changed_pixels[(y,x)] = death_mat[0][x][y]
-
-            permiability_change += self.change_terrain(y, x, terrain_type, verbose=verbose)
+                changed_pixels[(y,x)] = death_mat[0][y][x]
 
         self.changed_pixels = changed_pixels
         return permiability_change
@@ -384,8 +384,8 @@ Noisy defecit restoration:
     6. Compute connectivity with og permiability again to observe the change in connectivity before and after noisy restoration
 '''
 class noisyDefecitRestoration(restorationOptimizer):
-    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, noisy_connectivity_fn, noisy_flow_fn, rand_divisor=75):
-        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, noisy_connectivity_fn, noisy_flow_fn, rand_divisor=75, unrestorable_matrix=None, unrestorable_terrain=[]):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
         self.noisy_connectivity_fn = noisy_connectivity_fn
         self.noisy_flow_fn = noisy_flow_fn
         self.noisy_permeability_dict = self.get_noisy_transmission_dict(random_divisor=rand_divisor)
@@ -436,8 +436,8 @@ Raises all terrain uniformly to high permiability, highest flow areas are where 
         b. change in sum of connectivity squared
 '''
 class utopianRestoration(restorationOptimizer):
-    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, utopian_connectivity_fn, utopian_flow_fn, permiability=0.9):
-        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, utopian_connectivity_fn, utopian_flow_fn, permiability=0.9, unrestorable_matrix=None, unrestorable_terrain=[]):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
         self.utopian_connectivity_fn = utopian_connectivity_fn
         self.utopian_flow_fn = utopian_flow_fn
         self.utopian_permeability_dict = self.get_utopian_transmission_dict(permiability=permiability)
@@ -575,8 +575,10 @@ class lowResDefecitRestoration(restorationOptimizer):
                 scaled_death_fn,
                 permeability_dict, 
                 rscale, cscale,
-                pixels):
-        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+                pixels, 
+                unrestorable_matrix=None,
+                unrestorable_terrain=[]):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
         self.scaled_death_fn = scaled_death_fn
         self.rscale = rscale
         self.cscale = cscale
@@ -650,8 +652,10 @@ class lowResProbablisticDefecitRestoration(restorationOptimizer):
                 scaled_death_fn,
                 permeability_dict, 
                 rscale, cscale,
-                pixels):
-        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels)
+                pixels,
+                unrestorable_matrix=None, 
+                unrestorable_terrain=[]):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
         self.scaled_death_fn = scaled_death_fn
         self.rscale = rscale
         self.cscale = cscale
@@ -695,12 +699,8 @@ class lowResProbablisticDefecitRestoration(restorationOptimizer):
         changed_pixels = {}
         permiability_change = 0 
 
-        print(death_indices)
-
         for index in death_indices:
             x, y = index // cols, index % cols # col, row
-            print(f'x: {x}, y: {y}: {scaled_death_mat[0][x][y]}')
-
             for i in range(x * self.rscale, x * self.rscale + self.rscale):
                 for j in range(y * self.cscale, y * self.cscale + self.cscale):
 
