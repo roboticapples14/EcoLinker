@@ -436,11 +436,12 @@ Raises all terrain uniformly to high permiability, highest flow areas are where 
         b. change in sum of connectivity squared
 '''
 class utopianRestoration(restorationOptimizer):
-    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, utopian_connectivity_fn, utopian_flow_fn, permiability=0.9, unrestorable_matrix=None, unrestorable_terrain=[]):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, utopian_connectivity_fn, utopian_flow_fn, permiability=0.8, unrestorable_matrix=None, unrestorable_terrain=[], power=2):
         super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
         self.utopian_connectivity_fn = utopian_connectivity_fn
         self.utopian_flow_fn = utopian_flow_fn
         self.utopian_permeability_dict = self.get_utopian_transmission_dict(permiability=permiability)
+        self.power = power
 
     '''
     :param n: number of highest death pixels to restore
@@ -475,7 +476,7 @@ class utopianRestoration(restorationOptimizer):
     '''
     :param permiability: floating point premiability [0,1] to uniformly assign to all terrain types
     '''
-    def get_utopian_transmission_dict(self, permiability=0.9):
+    def get_utopian_transmission_dict(self, permiability=0.8):
         utopian_transmission = self.permeability_dict.copy()
         with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
             raw_terrain = terrain_geotiff.get_all_as_tile().m
@@ -494,7 +495,7 @@ class utopianRestoration(restorationOptimizer):
         with GeoTiff.from_file(self.utopian_flow_fn) as utopian_flow:
             raw_utopian_flow = utopian_flow.get_all_as_tile().m.astype(np.int16)
         
-        return raw_utopian_flow - raw_flow
+        return np.power(raw_utopian_flow - raw_flow, self.power)
 
     '''
     Calculates difference btw utopian and regular flow, weighted by permiability inversed
@@ -505,7 +506,7 @@ class utopianRestoration(restorationOptimizer):
         with GeoTiff.from_file(self.utopian_flow_fn) as utopian_flow:
             raw_utopian_flow = utopian_flow.get_all_as_tile().m.astype(np.int16)
 
-        diff = raw_utopian_flow - raw_flow
+        diff = np.power(raw_utopian_flow - raw_flow, self.power)
         permiability = self.get_permiability_matrix()
         permiability_inversed = np.ones_like(permiability) - (permiability)**2
         diff_weighted = diff * permiability_inversed
