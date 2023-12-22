@@ -105,7 +105,7 @@ class restorationOptimizer():
     def get_highest_death_pixels(self, death_tif=None, n=None):
         if (n == None):
             n = self.pixels
-        if (death_tif == None):
+        if (death_tif is None):
             death_tif = self.death_fn
         death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
         flat_indices = np.argpartition(death_matrix.ravel(), -n)[-n:]
@@ -230,7 +230,7 @@ class restorationOptimizer():
         return reader
 
     # paint the changed terrain pixels with death values
-    def paint_changed_terrain_geotiff(self, changed_terrain_fn, changed_pixels=None):
+    def paint_changed_terrain_geotiff(self, changed_terrain_fn, changed_pixels=None, value=None):
         if (changed_pixels == None):
             changed_pixels = self.changed_pixels
         with GeoTiff.from_file(self.connectivity_fn) as connectivity_tif:
@@ -238,7 +238,7 @@ class restorationOptimizer():
 
         with GeoTiff.from_file(changed_terrain_fn) as changed_terrain_tif:
             for (x,y), death in changed_pixels.items():
-                    m = np.array([[[death]]])
+                    m = np.array([[[death if value == None else value]]])
                     tile = Tile(1, 1, 0, 1, x, y, m)
                     changed_terrain_tif.set_tile(tile)
 
@@ -304,6 +304,27 @@ class restorationOptimizer():
             with ter.clone_shape(filename, dtype='float32') as perm:
                 perm.set_tile(permiability_tile)
 
+'''
+Defecit based restoration
+    1. Compute connectivity to get gradient, and for baseline comparison
+    2. Calculate death layer from gradient
+    3. Get n pixels with highest death
+    4. Restore each of those pixels to higher permiability terrain
+    5. Compute connectivity with restored terrain
+    6. Evaluate the ratio between change in connectivity and restored permiability
+'''
+class defecitRestoration(restorationOptimizer):
+    '''
+    Runs restore_pixels, which computes the death layer and then restores the n highest death pixels 
+    :param n: number of highest death pixels to restore
+    :param terrain_type: terrain type to restore to
+    :param verbose: print terrain conversion of every pixel
+    '''
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+        permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, verbose=verbose)
+        return permiability_restored
 '''
 Defecit based restoration
     1. Compute connectivity to get gradient, and for baseline comparison
@@ -458,7 +479,8 @@ class utopianRestoration(restorationOptimizer):
 
         diff = self.get_flow_diff() if (not weighted) else self.get_flow_diff_weighted_by_permiability()
 
-        highest_diff = self.get_highest_diff_pixels(diff, n)
+        # highest_diff = self.get_highest_diff_pixels(diff, n)
+        highest_diff = self.get_lowest_diff_pixels(diff, n)
         self.changed_pixels = highest_diff
 
         permiability_change = 0
@@ -493,9 +515,10 @@ class utopianRestoration(restorationOptimizer):
         with GeoTiff.from_file(self.flow_fn) as flow:
             raw_flow = flow.get_all_as_tile().m.astype(np.int16)
         with GeoTiff.from_file(self.utopian_flow_fn) as utopian_flow:
-            raw_utopian_flow = utopian_flow.get_all_as_tile().m.astype(np.int16)
-        
-        return np.power(raw_utopian_flow - raw_flow, self.power)
+            raw_utopian_flow = utopian_flow.get_all_as_tile().m.astype(np.int16)            
+
+        diff = np.power(raw_utopian_flow - raw_flow, self.power)
+        return diff
 
     '''
     Calculates difference btw utopian and regular flow, weighted by permiability inversed
@@ -550,8 +573,215 @@ class utopianRestoration(restorationOptimizer):
             if permiability < 1:
                 highest_diff[(col_indices[i-1], row_indices[i-1])] = diff[row_indices[i-1]][col_indices[i-1]]
             i -= 1
-        
         return highest_diff
+
+    '''
+    Gets n pixels with the highest difference in flow, with permiability < 1
+    :param diff: difference np matrix
+    :returns: dict of highest diff pixels formatted {(col,row): death}
+    '''
+    def get_lowest_diff_pixels(self, diff, n=None):
+        if (n == None):
+            n = self.pixels
+        flat_indices = np.argpartition(diff.ravel(), n)[:n]
+        diff = diff.squeeze(0)
+        row_indices, col_indices = np.unravel_index(flat_indices, diff.shape)
+
+        min_elements = diff[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_diff = {}
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m
+            raw_terrain = raw_terrain.squeeze(0)
+
+        i = 0
+        while (len(highest_diff.items()) < n and i < n):
+            terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+            permiability = self.permeability_dict[terrain]
+            if permiability < 1:
+                highest_diff[(col_indices[i-1], row_indices[i-1])] = diff[row_indices[i-1]][col_indices[i-1]]
+            i += 1
+        return highest_diff
+
+'''
+Flow based restoration
+    1. Compute connectivity to get gradient, and for baseline comparison
+    2. Get n pixels with highest gradient, or flow
+    3. Restore each of those pixels to higher permiability terrain
+    4. Compute connectivity with restored terrain
+    5. Evaluate the ratio between change in connectivity and restored permiability
+'''
+class flowRestoration(restorationOptimizer):
+    '''
+    :param n: number of highest death pixels to restore
+    :param terrain_type: terrain type to restore to
+    :param verbose: print terrain conversion of every pixel
+    '''
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+
+        current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        with GeoTiff.from_file(self.flow_fn) as flow_tif:
+            flow = flow_tif.get_all_as_tile().m
+
+        highest_flow = self.get_highest_flow_pixels(flow, n)
+        self.changed_pixels = highest_flow
+
+        permiability_change = 0
+        for x, y in highest_flow.keys():
+            permiability_change += self.change_terrain(x, y, terrain_type, verbose=verbose)
+
+        return permiability_change
+
+    '''
+    Gets n pixels with the highest flow, with permiability < 1
+    :param diff: difference np matrix
+    :returns: dict of highest diff pixels formatted {(col,row): death}
+    '''
+    def get_highest_flow_pixels(self, flow, n=None):
+        if (n == None):
+            n = self.pixels
+        flow = flow.squeeze(0)
+        total_px = flow.shape[0] * flow.shape[1]
+        flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+        row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+        min_elements = flow[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_flow = {}
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m
+            raw_terrain = raw_terrain.squeeze(0)
+
+        i = total_px
+        while (len(highest_flow.items()) < n and i > 0):
+            terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+            permiability = self.permeability_dict[terrain]
+            if permiability < 1:
+                highest_flow[(col_indices[i-1], row_indices[i-1])] = flow[row_indices[i-1]][col_indices[i-1]]
+            i -= 1
+        return highest_flow
+
+'''
+Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
+* Attempting to focus more on corridors/clusters
+    1. Compute connectivity
+    2. Compute death
+    3. Scale down death tif
+    4. Calculate highest death on low-res death tif
+    5. Restore_pixels should take the low-res high death pixels and restore that region on OG terrain
+    6. Rerun connectivity w/ restored terrain
+'''
+class lowResFlowRestoration(restorationOptimizer):
+    def __init__(self, 
+                habitat_fn, 
+                terrain_fn, 
+                restored_terr_fn, 
+                connectivity_fn, 
+                restored_connectivity_fn,
+                flow_fn, 
+                restored_flow_fn, 
+                death_fn, 
+                scaled_flow_fn,
+                permeability_dict, 
+                rscale, cscale,
+                pixels, 
+                unrestorable_matrix=None,
+                unrestorable_terrain=[]):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix, unrestorable_terrain)
+        self.scaled_flow_fn = scaled_flow_fn
+        self.rscale = rscale
+        self.cscale = cscale
+
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+        permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, flow_fn=self.flow_fn, terrain_fn=self.terrain_fn, restored_terrain_fn=self.restored_terr_fn, verbose=verbose)
+        return permiability_restored
+
+    '''
+    Gets n pixels with the highest flow, with permiability < 1
+    :param diff: difference np matrix
+    :returns: dict of highest diff pixels formatted {(col,row): death}
+    '''
+    def get_highest_flow_pixels(self, flow, n=None):
+        if (n == None):
+            n = self.pixels
+        flow = flow.squeeze(0)
+        total_px = flow.shape[0] * flow.shape[1]
+        flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+        row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+        min_elements = flow[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_flow = {}
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m
+            raw_terrain = raw_terrain.squeeze(0)
+
+        i = total_px
+        while (len(highest_flow.items()) < n and i > 0):
+            x = row_indices[i-1]
+            y = col_indices[i-1]
+            perm_ls = []
+            for i in range(x * self.rscale, x * self.rscale + self.rscale):
+                for j in range(y * self.cscale, y * self.cscale + self.cscale):
+                    terrain = raw_terrain[i][j]
+                    permiability = self.permeability_dict[terrain]
+                    perm_ls.append(permiability)
+            # TODO: change to only a fraction can be 1
+            if 1 not in perm_ls:
+                highest_flow[(y, x)] = flow[x][y]
+            i -= 1
+            print(perm_ls)
+        return highest_flow
+
+    '''
+    Restores n pixels
+    :param x: col value of pixel coordinate to change
+    :param y: row value of pixel coordinate to change
+    :param ter_fn: terrain file name, or self.terrain if None
+    :param flow_fn: flow filename to calculate the death layer
+    :param verbose: Prints the terrain code and permiability of the changed pixel before and after change
+    '''
+    def restore_pixels(self, n=None, terrain_type=None, flow_fn=None, terrain_fn=None, restored_terrain_fn=None, verbose=False):
+        terrain_fn = terrain_fn if terrain_fn else self.terrain_fn
+        restored_terrain_fn = restored_terrain_fn if restored_terrain_fn else self.restored_terr_fn
+
+        current_terr_tile = GeoTiff.from_file(terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+        with GeoTiff.from_file(self.scaled_flow_fn) as flow:
+            flow_mat = flow.get_all_as_tile().m
+
+        self.scale_geotiff(self.flow_fn, self.scaled_flow_fn, row_pixels=self.rscale, col_pixels=self.cscale)
+        with GeoTiff.from_file(self.scaled_flow_fn) as scaled_flow:
+            scaled_flow_mat = scaled_flow.get_all_as_tile().m
+        highest_flow = self.get_highest_flow_pixels(scaled_flow_mat, math.ceil(n/(self.rscale * self.cscale)))
+        
+        print(highest_flow)
+        changed_pixels = {}
+
+        permiability_change = 0
+        for x, y in highest_flow.keys():
+            for i in range(x * self.rscale, x * self.rscale + self.rscale):
+                for j in range(y * self.cscale, y * self.cscale + self.cscale):
+                    change = self.change_terrain(i,j, terrain_type, verbose=verbose)
+                    if change is not None:
+                        permiability_change += change
+                        changed_pixels[(i,j)] = flow_mat[0][j][i]
+        self.changed_pixels = changed_pixels
+        return permiability_change
 
 '''
 Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
@@ -608,16 +838,12 @@ class lowResDefecitRestoration(restorationOptimizer):
 
         death_tif = self.get_death_layer(self.death_fn, flow_fn=flow_fn, terrain_fn=terrain_fn)
         death_mat = death_tif.get_all_as_tile().m
-
         self.scale_geotiff(self.death_fn, self.scaled_death_fn, row_pixels=self.rscale, col_pixels=self.cscale)
-
         scaled_death_tif = GeoTiff.from_file(self.scaled_death_fn)
-
         highest_death = self.get_highest_death_pixels(scaled_death_tif, math.ceil(n/(self.rscale * self.cscale)))
-
         changed_pixels = {}
 
-        permiability_change = 0 
+        permiability_change = 0
         for x, y in highest_death.keys():
             for i in range(x * self.rscale, x * self.rscale + self.rscale):
                 for j in range(y * self.cscale, y * self.cscale + self.cscale):
@@ -625,9 +851,7 @@ class lowResDefecitRestoration(restorationOptimizer):
                     if change is not None:
                         permiability_change += change
                         changed_pixels[(i,j)] = death_mat[0][j][i]
-
         self.changed_pixels = changed_pixels
-
         return permiability_change
 
 '''
