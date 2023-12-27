@@ -744,6 +744,7 @@ class lowResFlowRestoration(restorationOptimizer):
                 highest_flow[(y, x)] = flow[x][y]
             i -= 1
             print(perm_ls)
+            print(len(highest_flow.items()))
         return highest_flow
 
     '''
