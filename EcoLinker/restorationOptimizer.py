@@ -105,7 +105,7 @@ class restorationOptimizer():
         if (n == None):
             n = self.pixels
         if (death_tif is None):
-            death_tif = self.death_fn
+            death_tif = GeoTiff.from_file(self.death_fn)
         death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
         flat_indices = np.argpartition(death_matrix.ravel(), -n)[-n:]
         row_indices, col_indices = np.unravel_index(flat_indices, death_matrix.shape)
@@ -392,6 +392,49 @@ class probalisticDeficitRestoration(restorationOptimizer):
         self.changed_pixels = changed_pixels
         return permiability_change
 
+class deficitFlowRestoration(restorationOptimizer):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[], flow_power=1):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, death_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
+        self.flow_power = flow_power
+
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+        permiability_restored = self.restore_pixels(n=n, terrain_type=terrain_type, verbose=verbose)
+        return permiability_restored
+
+    '''
+    Calculates death weighted by (flow layer)^flow_power
+    Death here is (flow^(flow_power) * (1-permiability)), which calculates the number of birds who died attempting to disperse through this pixel
+    :param death_tif: filename of death geotiff
+    '''
+    def get_death_layer(self, death_fn=None, flow_fn=None, terrain_fn=None):
+        if (death_fn == None):
+            death_fn = self.death_fn
+        if (flow_fn == None):
+            flow_fn = self.flow_fn
+        if (terrain_fn == None):
+            terrain_fn = self.terrain_fn
+
+        with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
+            raw_terrain = terrain_geotiff.get_all_as_tile().m
+        with GeoTiff.from_file(flow_fn) as flow_geotiff:
+            raw_flow = flow_geotiff.get_all_as_tile().m.astype('float64')
+        
+        permeability = ecoscape_connectivity.util.dict_translate(raw_terrain, self.permeability_dict)
+        inverse_permeability = np.subtract(np.ones_like(permeability), permeability)
+        death = np.multiply(np.power(raw_flow, self.flow_power), inverse_permeability)
+        norm_death = np.clip(np.log10(1. + death) * 10., 0, 255).astype(np.uint8)
+
+        with GeoTiff.from_file(self.connectivity_fn) as flow_geotiff:
+            flow_geotiff.clone_shape(death_fn)
+        with GeoTiff.from_file(death_fn) as death_geotiff:
+            tile = Tile(death_geotiff.width, death_geotiff.height, 0, 0, 0, 0, norm_death)
+            death_geotiff.set_tile(tile)
+        
+        tif = GeoTiff.from_file(death_fn)
+        return tif
+
 '''
 Noisy defecit restoration:
     1. Compute connectivity with unaltered permiability dict for baseline comparison
@@ -662,14 +705,15 @@ class flowRestoration(restorationOptimizer):
 
         highest_flow = {}
         with GeoTiff.from_file(self.terrain_fn) as terr:
-            raw_terrain = terr.get_all_as_tile().m
-            raw_terrain = raw_terrain.squeeze(0)
+            raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+        with GeoTiff.from_file(self.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m.squeeze(0)
 
         i = total_px
         while (len(highest_flow.items()) < n and i > 0):
             terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
             permiability = self.permeability_dict[terrain]
-            if permiability < 1:
+            if permiability < 1 and raw_hab[row_indices[i-1]][col_indices[i-1]] != 1:
                 highest_flow[(col_indices[i-1], row_indices[i-1])] = flow[row_indices[i-1]][col_indices[i-1]]
             i -= 1
         return highest_flow
@@ -732,8 +776,9 @@ class lowResFlowRestoration(restorationOptimizer):
 
         highest_flow = []
         with GeoTiff.from_file(self.terrain_fn) as terr:
-            raw_terrain = terr.get_all_as_tile().m
-            raw_terrain = raw_terrain.squeeze(0)
+            raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+        with GeoTiff.from_file(self.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m.squeeze(0)
 
         k = total_px
         scale = self.rscale * self.cscale
@@ -745,7 +790,7 @@ class lowResFlowRestoration(restorationOptimizer):
                 for j in range(y * self.cscale, y * self.cscale + self.cscale):
                     terrain = raw_terrain[j][i]
                     permiability = self.permeability_dict[terrain]
-                    if permiability != 1:
+                    if permiability != 1 and raw_hab[j][i] != 1:
                         not_permiable.append((i, j))
             if len(not_permiable) / scale >= self.percent_impermiable:
                 highest_flow.extend(not_permiable)
@@ -945,3 +990,92 @@ class lowResProbablisticDefecitRestoration(restorationOptimizer):
         self.changed_pixels = changed_pixels
 
         return permiability_change
+
+
+
+'''
+Flow based restoration for multiple species
+    1. Compute connectivity for both species to get gradients
+    2. Take average of gradients
+    2. Get n pixels with highest average gradient, or flow
+    3. Restore each of those pixels to the highest permiability among the species
+    4. Compute connectivity for both with restored terrain
+    5. Evaluate the ratio between change in connectivity and restored permiability
+'''
+class multiFlowRestoration(restorationOptimizer):
+    '''
+    :list habitat_fn: list of habitat filenames
+    :string terrain_fn: one terrain filename
+    :string restored_terr_fn: one restored terrain filename
+    :list connectivity_fn: list of connectivity filenames
+    :list flow_fn: list of flow filenames
+    :list restored_connectivity_fn: list of restored connectivity filenames
+    :list restored_flow_fn: list of restored flow filenames
+    :list permeability_dict: list of permeability dict filenames
+    :int pixels: number px to restore
+    :matrix unrestorable_matrix: unrestorable matrix
+    :list unrestorable_terrain: unrestorable terrain
+    '''
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[]):
+        super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, '', permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
+        
+    '''
+    :param n: number of highest death pixels to restore
+    :param terrain_type: terrain type to restore to
+    :param verbose: print terrain conversion of every pixel
+    '''
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+
+        current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        with GeoTiff.from_file(self.flow_fn) as flow_tif:
+            flow = flow_tif.get_all_as_tile().m
+
+        highest_flow = self.get_highest_flow_pixels(flow, n)
+        self.changed_pixels = highest_flow.copy()
+
+        permiability_change = 0
+        for x, y in highest_flow.keys():
+            change = self.change_terrain(x, y, terrain_type, verbose=verbose)
+            if change == False:
+                self.changed_pixels.pop((x,y))
+            else:
+                permiability_change += change
+
+        return permiability_change
+
+    '''
+    Gets n pixels with the highest flow, with permiability < 1
+    :param diff: difference np matrix
+    :returns: dict of highest diff pixels formatted {(col,row): death}
+    '''
+    def get_highest_flow_pixels(self, flow, n=None):
+        if (n == None):
+            n = self.pixels
+        flow = flow.squeeze(0)
+        total_px = flow.shape[0] * flow.shape[1]
+        flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+        row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+        min_elements = flow[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_flow = {}
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+        with GeoTiff.from_file(self.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m.squeeze(0)
+
+        i = total_px
+        while (len(highest_flow.items()) < n and i > 0):
+            terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+            permiability = self.permeability_dict[terrain]
+            if permiability < 1 and raw_hab[row_indices[i-1]][col_indices[i-1]] != 1:
+                highest_flow[(col_indices[i-1], row_indices[i-1])] = flow[row_indices[i-1]][col_indices[i-1]]
+            i -= 1
+        return highest_flow
