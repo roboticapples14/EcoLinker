@@ -969,6 +969,10 @@ class bfsFlowRestoration(restorationOptimizer):
                 if neighbor_col >= 0 and neighbor_col < flow.shape[1] and neighbor_row >= 0 and neighbor_row < flow.shape[0]:
                     neighbor_flow = flow[neighbor_row][neighbor_col]
                     if neighbor_flow > max_neighbor_flow and (neighbor_col, neighbor_row) not in highest_flow and (neighbor_col, neighbor_row) not in seen and (neighbor_col, neighbor_row) not in stack and optimizer.permeability_dict[raw_terrain[row][col]] < 1 and raw_hab[row][col] != 1: 
+                        # limited neighbors in highest_flow
+                        neighbors_of_neighbors_in_highest_flow = [x for x in [(neighbor_col - 1, neighbor_row), (neighbor_col + 1, neighbor_row), (neighbor_col, neighbor_row - 1), (neighbor_col, neighbor_row + 1), (neighbor_col - 1, neighbor_row - 1), (neighbor_col + 1, neighbor_row + 1), (neighbor_col - 1, neighbor_row + 1), (neighbor_col + 1, neighbor_row - 1)] if x in highest_flow]
+                        if len(neighbors_of_neighbors_in_highest_flow) > 3:
+                            break
                         max_neighbor = (neighbor_col, neighbor_row)
                         max_neighbor_flow = neighbor_flow
             if max_neighbor_flow > 0:
@@ -977,6 +981,58 @@ class bfsFlowRestoration(restorationOptimizer):
                 stack.append((col_indices[i-1], row_indices[i-1]))
                 i -= 1
         return highest_flow
+
+    # def get_bfs_flow_pixels(optimizer, flow, n=None, number_corridors=None):
+    #     if (n == None):
+    #         n = optimizer.pixels
+    #     if (number_corridors == None):
+    #         number_corridors = n / 5
+    #     flow = flow.squeeze(0)
+    #     total_px = flow.shape[0] * flow.shape[1]
+    #     flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+    #     row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+    #     min_elements = flow[row_indices, col_indices]
+    #     min_elements_order = np.argsort(min_elements)
+    #     row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+    #     highest_flow = {}
+    #     with GeoTiff.from_file(optimizer.terrain_fn) as terr:
+    #         raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+    #     with GeoTiff.from_file(optimizer.habitat_fn) as hab:
+    #         raw_hab = hab.get_all_as_tile().m.squeeze(0)
+
+    #     stack = []
+    #     seen = []
+    #     i = total_px
+    #     while len(stack) < number_corridors:
+    #         terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+    #         permiability = optimizer.permeability_dict[terrain]
+    #         if permiability < 1 and raw_hab[row_indices[i-1]][col_indices[i-1]] != 1:
+    #             stack.append((col_indices[i-1], row_indices[i-1]))
+    #         i -= 1
+    #     while (len(highest_flow.items()) < n and len(stack) > 0):
+    #         col, row = stack.pop(0)
+    #         seen.append((col, row))
+    #         terrain = raw_terrain[row][col]
+    #         permiability = optimizer.permeability_dict[terrain]
+    #         if permiability < 1 and raw_hab[row][col] != 1:
+    #             highest_flow[(col, row)] = flow[row][col]
+    #         # find highest grad of neighbors and push to stack
+    #         max_neighbor = ()
+    #         max_neighbor_flow = 0
+    #         for neighbor_col, neighbor_row in [(col - 1, row), (col + 1, row), (col, row - 1), (col, row + 1), (col - 1, row - 1), (col + 1, row + 1), (col - 1, row + 1), (col + 1, row - 1)]:
+    #             if neighbor_col >= 0 and neighbor_col < flow.shape[1] and neighbor_row >= 0 and neighbor_row < flow.shape[0]:
+    #                 neighbor_flow = flow[neighbor_row][neighbor_col]
+    #                 if neighbor_flow > max_neighbor_flow and (neighbor_col, neighbor_row) not in highest_flow and (neighbor_col, neighbor_row) not in seen and (neighbor_col, neighbor_row) not in stack and optimizer.permeability_dict[raw_terrain[row][col]] < 1 and raw_hab[row][col] != 1: 
+    #                     max_neighbor = (neighbor_col, neighbor_row)
+    #                     max_neighbor_flow = neighbor_flow
+    #         if max_neighbor_flow > 0:
+    #             stack.append(max_neighbor)
+    #         else:
+    #             stack.append((col_indices[i-1], row_indices[i-1]))
+    #             i -= 1
+    #     return highest_flow
 
 '''
 Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
