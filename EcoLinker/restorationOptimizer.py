@@ -29,9 +29,9 @@ class restorationOptimizer():
     '''
     def run_connectivity(self, single_tile=True, deterministic=True, restored=False, gap_crossing=1, num_gaps=20):
         if (restored):
-            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, num_gaps=20, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
         else:
-            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, num_gaps=20, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
 
     '''
     Get the change in connectivity before and after restoration
@@ -81,11 +81,17 @@ class restorationOptimizer():
         with GeoTiff.from_file(flow_fn) as flow_geotiff:
             raw_flow = flow_geotiff.get_all_as_tile().m.astype('float64')
         
+        # permeability = ecoscape_connectivity.util.dict_translate(raw_terrain, self.permeability_dict)
+        # sensitivity = np.divide(raw_flow, permeability, out=np.zeros_like(raw_flow), where=permeability!=0.0)
+        # inverse_permeability = np.subtract(np.ones_like(permeability), permeability)
+        # death = np.multiply(sensitivity, inverse_permeability)
+        # norm_death = np.clip(np.log10(1. + death) * 20., 0, 255).astype(np.uint8)
+
         permeability = ecoscape_connectivity.util.dict_translate(raw_terrain, self.permeability_dict)
         sensitivity = np.divide(raw_flow, permeability, out=np.zeros_like(raw_flow), where=permeability!=0.0)
-        inverse_permeability = np.subtract(np.ones_like(permeability), permeability)
-        death = np.multiply(sensitivity, inverse_permeability)
-        norm_death = np.clip(np.log10(1. + death) * 20., 0, 255).astype(np.uint8)
+        # inverse_permeability = np.subtract(np.ones_like(permeability), permeability)
+        # death = np.multiply(sensitivity, inverse_permeability)
+        norm_death = np.clip(np.log10(1. + sensitivity) * 20., 0, 255).astype(np.uint8)
 
         with GeoTiff.from_file(self.connectivity_fn) as flow_geotiff:
             flow_geotiff.clone_shape(death_fn)
@@ -107,18 +113,55 @@ class restorationOptimizer():
         if (death_tif is None):
             death_tif = GeoTiff.from_file(self.death_fn)
         death_matrix = death_tif.get_all_as_tile().m.squeeze(0)
-        flat_indices = np.argpartition(death_matrix.ravel(), -n)[-n:]
+        total_px = death_matrix.shape[0] * death_matrix.shape[1]
+        flat_indices = np.argpartition(death_matrix.ravel(), -total_px)[-total_px:]
         row_indices, col_indices = np.unravel_index(flat_indices, death_matrix.shape)
 
         min_elements = death_matrix[row_indices, col_indices]
         min_elements_order = np.argsort(min_elements)
         row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
 
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+        with GeoTiff.from_file(self.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m.squeeze(0)
         highest_death = {}
-        for i in range(n, 0, -1):
-            highest_death[(col_indices[i-1], row_indices[i-1])] = death_matrix[row_indices[i-1]][col_indices[i-1]]
 
+        i = total_px
+        while (len(highest_death.items()) < n and i > 0):
+            terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+            permiability = self.permeability_dict[terrain]
+            if permiability < 1 and raw_hab[row_indices[i-1]][col_indices[i-1]] != 1:
+                highest_death[(col_indices[i-1], row_indices[i-1])] = death_matrix[row_indices[i-1]][col_indices[i-1]]
+            i -= 1
         return highest_death
+
+    def get_highest_flow_pixels(self, flow, n=None):
+        if (n == None):
+            n = self.pixels
+        flow = flow.squeeze(0)
+        total_px = flow.shape[0] * flow.shape[1]
+        flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+        row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+        min_elements = flow[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_flow = {}
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+        with GeoTiff.from_file(self.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m.squeeze(0)
+
+        i = total_px
+        while (len(highest_flow.items()) < n and i > 0):
+            terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+            permiability = self.permeability_dict[terrain]
+            if permiability < 1 and raw_hab[row_indices[i-1]][col_indices[i-1]] != 1:
+                highest_flow[(col_indices[i-1], row_indices[i-1])] = flow[row_indices[i-1]][col_indices[i-1]]
+            i -= 1
+        return highest_flow
 
     '''
     takes a np matrix and shrinks it to the resolution given, making each pixel the sum of the constituting pixels
@@ -541,13 +584,14 @@ class utopianRestoration(restorationOptimizer):
     '''
     :param permiability: floating point premiability [0,1] to uniformly assign to all terrain types
     '''
-    def get_utopian_transmission_dict(self, permiability=0.8):
+    def get_utopian_transmission_dict(self, permiability=0.8, delta_permiability=0):
         utopian_transmission = self.permeability_dict.copy()
         with GeoTiff.from_file(self.terrain_fn) as terrain_geotiff:
             raw_terrain = terrain_geotiff.get_all_as_tile().m
             terrain_codes = np.unique(raw_terrain)
         for i in terrain_codes:
-            utopian_transmission[i] = permiability
+            # utopian_transmission[i] = permiability
+            utopian_transmission[i] = utopian_transmission[i] + 0.5 if (utopian_transmission[i] + 0.5) < 1 else 1
         return utopian_transmission
 
     '''
@@ -719,6 +763,222 @@ class flowRestoration(restorationOptimizer):
         return highest_flow
 
 '''
+Flow based restoration
+    1. Compute connectivity to get gradient, and for baseline comparison
+    2. Perform greedy search with starting nodes of highest pixels until n pixels have been chosen
+    3. Restore each of those pixels to higher permiability terrain
+    4. Compute connectivity with restored terrain
+    5. Evaluate the ratio between change in connectivity and restored permiability
+'''
+class greedyFlowRestoration(restorationOptimizer):
+    '''
+    :param n: number of highest death pixels to restore
+    :param terrain_type: terrain type to restore to
+    :param verbose: print terrain conversion of every pixel
+    '''
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+
+        current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        with GeoTiff.from_file(self.flow_fn) as flow_tif:
+            flow = flow_tif.get_all_as_tile().m
+
+        highest_flow = self.get_greedy_flow_pixels(flow, n)
+        self.changed_pixels = highest_flow.copy()
+
+        permiability_change = 0
+        for x, y in highest_flow.keys():
+            change = self.change_terrain(x, y, terrain_type, verbose=verbose)
+            if change == False:
+                self.changed_pixels.pop((x,y))
+            else:
+                permiability_change += change
+
+        return permiability_change
+
+    '''
+    Gets n pixels with the highest flow, with permiability < 1
+    :param diff: difference np matrix
+    :returns: dict of highest diff pixels formatted {(col,row): death}
+    '''
+    # def get_greedy_flow_pixels(self, flow, n=None):
+    #     if (n == None):
+    #         n = self.pixels
+    #     flow = flow.squeeze(0)
+    #     total_px = flow.shape[0] * flow.shape[1]
+    #     flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+    #     row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+    #     min_elements = flow[row_indices, col_indices]
+    #     min_elements_order = np.argsort(min_elements)
+    #     row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+    #     highest_flow = {}
+    #     with GeoTiff.from_file(self.terrain_fn) as terr:
+    #         raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+    #     with GeoTiff.from_file(self.habitat_fn) as hab:
+    #         raw_hab = hab.get_all_as_tile().m.squeeze(0)
+
+    #     i = total_px
+    #     seen = []
+    #     while (len(highest_flow.items()) < n and i > 0):
+    #         stack = [(col_indices[i-1], row_indices[i-1])]
+    #         while len(stack) > 0 and len(highest_flow.items()) < n:
+    #             col, row = stack.pop()
+    #             seen.append((col, row))
+    #             terrain = raw_terrain[row][col]
+    #             permiability = self.permeability_dict[terrain]
+    #             if permiability < 1 and raw_hab[row][col] != 1:
+    #                 highest_flow[(col, row)] = flow[row][col]
+    #             # find highest grad of neighbors and push to stack
+    #             max_neighbor = ()
+    #             max_neighbor_flow = 0
+    #             for neighbor_col, neighbor_row in [(col - 1, row), (col + 1, row), (col, row - 1), (col, row + 1), (col - 1, row - 1), (col + 1, row + 1), (col - 1, row + 1), (col + 1, row - 1)]:
+    #                 neighbor_flow = flow[neighbor_row][neighbor_col]
+    #                 if neighbor_flow > max_neighbor_flow and (neighbor_col, neighbor_row) not in seen:
+    #                     max_neighbor = (neighbor_col, neighbor_row)
+    #                     max_neighbor_flow = neighbor_flow
+    #             if max_neighbor_flow > 0:
+    #                 stack.append(max_neighbor)
+    #         i -= 1
+    #     return highest_flow
+
+    def get_greedy_flow_pixels(self, flow, n=None):
+        if (n == None):
+            n = self.pixels
+        flow = flow.squeeze(0)
+        total_px = flow.shape[0] * flow.shape[1]
+        flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+        row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+        min_elements = flow[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_flow = {}
+        with GeoTiff.from_file(self.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+        with GeoTiff.from_file(self.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m.squeeze(0)
+
+        i = total_px
+        while (len(highest_flow.items()) < n and i > 0):
+            stack = [(col_indices[i-1], row_indices[i-1])]
+            while len(stack) > 0:
+                col, row = stack.pop()
+                terrain = raw_terrain[row][col]
+                permiability = self.permeability_dict[terrain]
+                if permiability < 1 and raw_hab[row][col] != 1:
+                    highest_flow[(col, row)] = flow[row][col]
+                    # find highest grad of neighbors and push to stack
+                    max_neighbor = ()
+                    max_neighbor_flow = 0
+                    for neighbor_col, neighbor_row in [(col - 1, row), (col + 1, row), (col, row - 1), (col, row + 1), (col - 1, row - 1), (col + 1, row + 1), (col - 1, row + 1), (col + 1, row - 1)]:
+                        neighbor_flow = flow[neighbor_row][neighbor_col]
+                        if neighbor_flow > max_neighbor_flow and (neighbor_col, neighbor_row) not in highest_flow:
+                            max_neighbor = (neighbor_col, neighbor_row)
+                            max_neighbor_flow = neighbor_flow
+                    stack.append(max_neighbor)
+                else:
+                    break
+            i -= 1
+        return highest_flow
+
+'''
+Flow based restoration
+    1. Compute connectivity to get gradient, and for baseline comparison
+    2. Perform greedy search with starting nodes of highest pixels until n pixels have been chosen
+    3. Restore each of those pixels to higher permiability terrain
+    4. Compute connectivity with restored terrain
+    5. Evaluate the ratio between change in connectivity and restored permiability
+'''
+class bfsFlowRestoration(restorationOptimizer):
+    '''
+    :param n: number of highest death pixels to restore
+    :param terrain_type: terrain type to restore to
+    :param verbose: print terrain conversion of every pixel
+    '''
+    def restore(self, n=None, terrain_type=None, verbose=False):
+        if (n==None):
+            n = self.pixels
+
+        current_terr_tile = GeoTiff.from_file(self.terrain_fn).get_all_as_tile()
+        with GeoTiff.from_file(self.restored_terr_fn) as restored_terr:
+            restored_terr.set_tile(current_terr_tile)
+
+        with GeoTiff.from_file(self.flow_fn) as flow_tif:
+            flow = flow_tif.get_all_as_tile().m
+
+        highest_flow = self.get_bfs_flow_pixels(flow, n)
+        self.changed_pixels = highest_flow.copy()
+
+        permiability_change = 0
+        for x, y in highest_flow.keys():
+            change = self.change_terrain(x, y, terrain_type, verbose=verbose)
+            if change == False:
+                self.changed_pixels.pop((x,y))
+            else:
+                permiability_change += change
+
+        return permiability_change
+
+    def get_bfs_flow_pixels(optimizer, flow, n=None, number_corridors=None):
+        if (n == None):
+            n = optimizer.pixels
+        if (number_corridors == None):
+            number_corridors = n / 5
+        flow = flow.squeeze(0)
+        total_px = flow.shape[0] * flow.shape[1]
+        flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
+        row_indices, col_indices = np.unravel_index(flat_indices, flow.shape)
+
+        min_elements = flow[row_indices, col_indices]
+        min_elements_order = np.argsort(min_elements)
+        row_indices, col_indices = row_indices[min_elements_order], col_indices[min_elements_order]
+
+        highest_flow = {}
+        with GeoTiff.from_file(optimizer.terrain_fn) as terr:
+            raw_terrain = terr.get_all_as_tile().m.squeeze(0)
+        with GeoTiff.from_file(optimizer.habitat_fn) as hab:
+            raw_hab = hab.get_all_as_tile().m.squeeze(0)
+
+        stack = []
+        seen = []
+        i = total_px
+        while len(stack) < number_corridors:
+            terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
+            permiability = optimizer.permeability_dict[terrain]
+            if permiability < 1 and raw_hab[row_indices[i-1]][col_indices[i-1]] != 1:
+                stack.append((col_indices[i-1], row_indices[i-1]))
+            i -= 1
+        while (len(highest_flow.items()) < n and len(stack) > 0):
+            col, row = stack.pop(0)
+            seen.append((col, row))
+            terrain = raw_terrain[row][col]
+            permiability = optimizer.permeability_dict[terrain]
+            if permiability < 1 and raw_hab[row][col] != 1:
+                highest_flow[(col, row)] = flow[row][col]
+            # find highest grad of neighbors and push to stack
+            max_neighbor = ()
+            max_neighbor_flow = 0
+            for neighbor_col, neighbor_row in [(col - 1, row), (col + 1, row), (col, row - 1), (col, row + 1), (col - 1, row - 1), (col + 1, row + 1), (col - 1, row + 1), (col + 1, row - 1)]:
+                if neighbor_col >= 0 and neighbor_col < flow.shape[1] and neighbor_row >= 0 and neighbor_row < flow.shape[0]:
+                    neighbor_flow = flow[neighbor_row][neighbor_col]
+                    if neighbor_flow > max_neighbor_flow and (neighbor_col, neighbor_row) not in highest_flow and (neighbor_col, neighbor_row) not in seen and (neighbor_col, neighbor_row) not in stack and optimizer.permeability_dict[raw_terrain[row][col]] < 1 and raw_hab[row][col] != 1: 
+                        max_neighbor = (neighbor_col, neighbor_row)
+                        max_neighbor_flow = neighbor_flow
+            if max_neighbor_flow > 0:
+                stack.append(max_neighbor)
+            else:
+                stack.append((col_indices[i-1], row_indices[i-1]))
+                i -= 1
+        return highest_flow
+
+'''
 Performs defecit restoration based on lower resolution terrain, scaling the pixels to squares of the area of restoration
 * Attempting to focus more on corridors/clusters
     1. Compute connectivity
@@ -786,8 +1046,8 @@ class lowResFlowRestoration(restorationOptimizer):
             x = col_indices[k-1]
             y = row_indices[k-1]
             not_permiable = []
-            for i in range(x * self.rscale, x * self.rscale + self.rscale):
-                for j in range(y * self.cscale, y * self.cscale + self.cscale):
+            for i in range(x * self.cscale, x * self.cscale + self.cscale):
+                for j in range(y * self.rscale, y * self.rscale + self.rscale):
                     terrain = raw_terrain[j][i]
                     permiability = self.permeability_dict[terrain]
                     if permiability != 1 and raw_hab[j][i] != 1:
@@ -1018,7 +1278,17 @@ class multiFlowRestoration(restorationOptimizer):
     '''
     def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[]):
         super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, '', permeability_dict, pixels, unrestorable_matrix=None, unrestorable_terrain=[])
-        
+
+    '''
+    Runs connectivity for either true or restored terrain
+    '''
+    def run_connectivity(self, single_tile=True, deterministic=True, restored=False, gap_crossing=[1], num_gaps=[20]):
+        for i in len(self.habitat_fn):
+            if (restored):
+                repopulation.compute_connectivity(self.habitat_fn[i], self.restored_terr_fn, self.restored_connectivity_fn[i], self.restored_flow_fn[i], self.permeability_dict[i], num_gaps=num_gaps[i], single_tile=single_tile, gap_crossing=gap_crossing[i], deterministic=deterministic)
+            else:
+                repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, num_gaps=num_gaps[i], single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
+
     '''
     :param n: number of highest death pixels to restore
     :param terrain_type: terrain type to restore to
