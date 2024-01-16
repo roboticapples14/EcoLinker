@@ -891,7 +891,7 @@ class bfsFlowRestoration(restorationOptimizer):
         if (n == None):
             n = self.pixels
         if (self.num_corridors == None):
-            number_corridors = n / 5
+            self.num_corridors = n / 5
         flow = flow.squeeze(0)
         total_px = flow.shape[0] * flow.shape[1]
         flat_indices = np.argpartition(flow.ravel(), -total_px)[-total_px:]
@@ -910,7 +910,7 @@ class bfsFlowRestoration(restorationOptimizer):
         stack = []
         seen = []
         i = total_px
-        while len(stack) < number_corridors:
+        while len(stack) < self.num_corridors:
             terrain = raw_terrain[row_indices[i-1]][col_indices[i-1]]
             permiability = self.permeability_dict[terrain]
             if permiability < 1 and raw_hab[row_indices[i-1]][col_indices[i-1]] != 1:
@@ -929,7 +929,7 @@ class bfsFlowRestoration(restorationOptimizer):
             for neighbor_col, neighbor_row in [(col - 1, row), (col + 1, row), (col, row - 1), (col, row + 1), (col - 1, row - 1), (col + 1, row + 1), (col - 1, row + 1), (col + 1, row - 1)]:
                 if neighbor_col >= 0 and neighbor_col < flow.shape[1] and neighbor_row >= 0 and neighbor_row < flow.shape[0]:
                     neighbor_flow = flow[neighbor_row][neighbor_col]
-                    if neighbor_flow > max_neighbor_flow and (neighbor_col, neighbor_row) not in highest_flow and (neighbor_col, neighbor_row) not in seen and (neighbor_col, neighbor_row) not in stack and optimizer.permeability_dict[raw_terrain[row][col]] < 1 and raw_hab[row][col] != 1: 
+                    if neighbor_flow > max_neighbor_flow and (neighbor_col, neighbor_row) not in highest_flow and (neighbor_col, neighbor_row) not in seen and (neighbor_col, neighbor_row) not in stack and self.permeability_dict[raw_terrain[row][col]] < 1 and raw_hab[row][col] != 1: 
                         # limited neighbors in highest_flow
                         neighbors_of_neighbors_in_highest_flow = [x for x in [(neighbor_col - 1, neighbor_row), (neighbor_col + 1, neighbor_row), (neighbor_col, neighbor_row - 1), (neighbor_col, neighbor_row + 1), (neighbor_col - 1, neighbor_row - 1), (neighbor_col + 1, neighbor_row + 1), (neighbor_col - 1, neighbor_row + 1), (neighbor_col + 1, neighbor_row - 1)] if x in highest_flow]
                         if len(neighbors_of_neighbors_in_highest_flow) > 3:
@@ -1101,9 +1101,7 @@ class lowResFlowRestoration(restorationOptimizer):
             raw_terrain = terr.get_all_as_tile().m
             raw_terrain = raw_terrain.squeeze(0)
 
-        print(highest_flow)
         changed_pixels = {}
-
         permiability_change = 0
         for x, y in highest_flow:
             change = self.change_terrain(x,y, terrain_type, verbose=verbose)
