@@ -25,6 +25,7 @@ class restorationOptimizer():
         self.unrestorable_terrain = unrestorable_terrain
         self.unrestorable_matrix = unrestorable_matrix
         self.terrain_type = None
+        self.terrain_changed = []
 
     '''
     Runs connectivity for either true or restored terrain
@@ -191,6 +192,7 @@ class restorationOptimizer():
             m = np.array([[[terrain_type]]])
             tile = Tile(1, 1, 0, 1, x, y, m)
             terrain_geotiff.set_tile(tile)
+            self.terrain_changed.append(old_terrain)
         
         if (verbose):
             print(f'Restoring pixel ({x}, {y}) from {old_terrain} with permiability {self.permeability_dict[old_terrain]} to {terrain_type} with permiability {self.permeability_dict[terrain_type]}')
