@@ -4,7 +4,8 @@ import numpy as np
 import math
 from collections import defaultdict
 from scgt import GeoTiff, Tile
-from ecoscape_connectivity_local import repopulation
+# from ecoscape_connectivity_local import repopulation
+from EcoLinker.ecoscape.ecoscape_connectivity_local import repopulation
 
 
 '''
@@ -30,11 +31,11 @@ class restorationOptimizer():
     '''
     Runs connectivity for either true or restored terrain
     '''
-    def run_connectivity(self, single_tile=True, deterministic=True, restored=False, gap_crossing=1, num_gaps=20):
+    def run_connectivity(self, single_tile=True, deterministic=1, restored=False, gap_crossing=1, num_gaps=20):
         if (restored):
-            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.restored_terr_fn, self.restored_connectivity_fn, self.restored_flow_fn, self.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, random_seed=deterministic)
         else:
-            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
+            repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.connectivity_fn, self.flow_fn, self.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, random_seed=deterministic)
 
     '''
     Get the change in connectivity before and after restoration
@@ -234,6 +235,28 @@ class restorationOptimizer():
         # write the tile to connectivity diff tif
         with GeoTiff.from_file(connectivity_diff_fn) as connectivity_diff:
             connectivity_diff.set_tile(diff)
+
+    # computes the percentage of connectivity changed from before to after restoration 
+    def get_percent_connectivity_changed_tif(self, connectivity_percent_changed_fn):
+        with GeoTiff.from_file(self.connectivity_fn) as connectivity_tif:
+            connectivity_tile = connectivity_tif.get_all_as_tile()
+            # create connectivity diff tif from clone of connectivity_tif
+            connectivity_tif.clone_shape(connectivity_percent_changed_fn, dtype='int16')
+
+        # get restored connectivity
+        with GeoTiff.from_file(self.restored_connectivity_fn) as restored_connectivity_tif:
+            restored_connectivity_tile = restored_connectivity_tif.get_all_as_tile()
+
+        og_connectivity = connectivity_tile.m.astype('float64')
+        # get the difference of the two in a tile
+        diff_np = (restored_connectivity_tile.m.astype('float64') - og_connectivity).astype('float64')
+        # diff_percent_np = diff_np / connectivity_tile.m.astype('int16')
+        diff_percent_np = np.true_divide(diff_np, og_connectivity, out=np.zeros_like(diff_np), where=og_connectivity!=0) * 100
+        percent_change_tile = Tile(connectivity_tile.w, connectivity_tile.h, connectivity_tile.b, connectivity_tile.c, connectivity_tile.x, connectivity_tile.y, diff_percent_np.astype('int16'))
+
+        # write the tile to connectivity diff tif
+        with GeoTiff.from_file(connectivity_percent_changed_fn) as connectivity_diff:
+            connectivity_diff.set_tile(percent_change_tile)
 
     '''
     Draw the permiability of terrain to a geotiff filename
@@ -438,8 +461,8 @@ class noisyDefecitRestoration(defecitRestoration):
     '''
     Adds noise to transmission raster then runs connectivity based on noisy terrain permiability
     '''
-    def run_noisy_connectivity(self, single_tile=True, deterministic=True):
-        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.noisy_connectivity_fn, self.noisy_flow_fn, self.noisy_permeability_dict, single_tile=single_tile, deterministic=deterministic)
+    def run_noisy_connectivity(self, single_tile=True, deterministic=1):
+        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.noisy_connectivity_fn, self.noisy_flow_fn, self.noisy_permeability_dict, single_tile=single_tile, random_seed=deterministic)
     
     '''
     Adds randomness to all low transmission values for more death exploration
@@ -469,11 +492,12 @@ Raises all terrain uniformly to high permiability, highest flow areas are where 
         b. change in sum of connectivity squared
 '''
 class utopianRestoration(restorationOptimizer):
-    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, permeability_dict, pixels, utopian_connectivity_fn, utopian_flow_fn, permiability=0.8, unrestorable_matrix=None, unrestorable_terrain=[]):
+    def __init__(self, habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, permeability_dict, pixels, utopian_connectivity_fn, utopian_flow_fn, permiability=0.8, unrestorable_matrix=None, unrestorable_terrain=[], add_flow=0):
         super().__init__(habitat_fn, terrain_fn, restored_terr_fn, connectivity_fn, flow_fn, restored_connectivity_fn, restored_flow_fn, permeability_dict, pixels, unrestorable_matrix, unrestorable_terrain)
         self.utopian_connectivity_fn = utopian_connectivity_fn
         self.utopian_flow_fn = utopian_flow_fn
         self.utopian_permeability_dict = self.get_utopian_transmission_dict(permiability=permiability)
+        self.add_flow = add_flow
 
     '''
     :param n: number of highest death pixels to restore
@@ -505,8 +529,8 @@ class utopianRestoration(restorationOptimizer):
     '''
     Adds noise to transmission raster then runs connectivity based on noisy terrain permiability
     '''
-    def run_utopian_connectivity(self, single_tile=True, deterministic=True):
-        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.utopian_connectivity_fn, self.utopian_flow_fn, self.utopian_permeability_dict, single_tile=single_tile, deterministic=deterministic)
+    def run_utopian_connectivity(self, single_tile=True, deterministic=1,  gap_crossing=1, num_gaps=10):
+        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.utopian_connectivity_fn, self.utopian_flow_fn, self.utopian_permeability_dict, single_tile=single_tile, random_seed=deterministic,  gap_crossing=gap_crossing, num_gaps=num_gaps)
     
     '''
     :param permiability: floating point premiability [0,1] to uniformly assign to all terrain types
@@ -529,7 +553,7 @@ class utopianRestoration(restorationOptimizer):
             raw_flow = flow.get_all_as_tile().m.astype(np.int16)
             min_val = np.min(raw_flow)
             max_val = np.max(raw_flow)
-            scaled_flow = ((raw_flow - min_val) / (max_val - min_val))**2
+            scaled_flow = ((raw_flow - min_val) + self.add_flow / (max_val - min_val)) + self.add_flow
         with GeoTiff.from_file(self.utopian_flow_fn) as utopian_flow:
             raw_utopian_flow = utopian_flow.get_all_as_tile().m.astype(np.int16)            
             min_val = np.min(raw_utopian_flow)
@@ -633,8 +657,8 @@ class utopianBFSRestoration(restorationOptimizer):
     '''
     Adds noise to transmission raster then runs connectivity based on noisy terrain permiability
     '''
-    def run_utopian_connectivity(self, single_tile=True, deterministic=True):
-        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.utopian_connectivity_fn, self.utopian_flow_fn, self.utopian_permeability_dict, single_tile=single_tile, deterministic=deterministic)
+    def run_utopian_connectivity(self, gap_crossing=1, num_gaps=10, single_tile=True, deterministic=1):
+        repopulation.compute_connectivity(self.habitat_fn, self.terrain_fn, self.utopian_connectivity_fn, self.utopian_flow_fn, self.utopian_permeability_dict, gap_crossing=1, num_gaps=10, single_tile=single_tile, random_seed=deterministic)
     
     '''
     :param permiability: floating point premiability [0,1] to uniformly assign to all terrain types
@@ -1399,8 +1423,9 @@ class multiFlowRestoration(restorationOptimizer):
     :int pixels: number px to restore
     :matrix unrestorable_matrix: unrestorable matrix
     :list unrestorable_terrain: unrestorable terrain
+    :list weights: list of how highly each species is weighted
     '''
-    def __init__(self, habitat_fns, terrain_fn, restored_terr_fns, connectivity_fns, flow_fns, restored_connectivity_fns, restored_flow_fns, permeability_dicts, bird_run_params, avg_flows_fn, pixels, unrestorable_matrix=None, unrestorable_terrain=[]):
+    def __init__(self, habitat_fns, terrain_fn, restored_terr_fns, connectivity_fns, flow_fns, restored_connectivity_fns, restored_flow_fns, permeability_dicts, bird_run_params, avg_flows_fn, pixels, unrestorable_matrix=None, unrestorable_terrain=[], weights=None):
         self.habitat_fn = habitat_fns
         self.terrain_fn = terrain_fn
         self.restored_terr_fn = restored_terr_fns
@@ -1415,6 +1440,10 @@ class multiFlowRestoration(restorationOptimizer):
         self.unrestorable_matrix = unrestorable_matrix
         self.avg_flows_fn = avg_flows_fn
         self.bird_run_params = bird_run_params
+        if weights == None:
+            self.weights = [1/len(habitat_fns) for i in len(habitat_fns)]
+        else: 
+            self.weights = weights
         self.restorers = []
         for i in range(len(habitat_fns)):
             print(permeability_dicts[i])
@@ -1424,14 +1453,14 @@ class multiFlowRestoration(restorationOptimizer):
     '''
     Runs connectivity for either true or restored terrain
     '''
-    def run_connectivity(self, single_tile=True, deterministic=True, restored=False, gap_crossing=None, num_gaps=None):
+    def run_connectivity(self, single_tile=True, deterministic=1, restored=False, gap_crossing=None, num_gaps=None):
         for i, restorer in enumerate(self.restorers):
             if gap_crossing == None or num_gaps == None:
                 gap_crossing, num_gaps = self.bird_run_params[i]
             if (restored):
-                repopulation.compute_connectivity(restorer.habitat_fn, restorer.restored_terr_fn, restorer.restored_connectivity_fn, restorer.restored_flow_fn, restorer.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
+                repopulation.compute_connectivity(restorer.habitat_fn, restorer.restored_terr_fn, restorer.restored_connectivity_fn, restorer.restored_flow_fn, restorer.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, random_seed=deterministic)
             else:
-                repopulation.compute_connectivity(restorer.habitat_fn, restorer.terrain_fn, restorer.connectivity_fn, restorer.flow_fn, restorer.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, deterministic=deterministic)
+                repopulation.compute_connectivity(restorer.habitat_fn, restorer.terrain_fn, restorer.connectivity_fn, restorer.flow_fn, restorer.permeability_dict, num_gaps=num_gaps, single_tile=single_tile, gap_crossing=gap_crossing, random_seed=deterministic)
 
     '''
     :param n: number of highest death pixels to restore
@@ -1452,10 +1481,9 @@ class multiFlowRestoration(restorationOptimizer):
                 flow_tif.clone_shape(self.avg_flows_fn)
 
         # calculate average flow
-        flow_avg = flows[0]
-        for flow in flows[1:]:
-            flow_avg += flow
-        flow_avg = flow_avg / len(self.restorers)
+        flow_avg = np.zeros_like(flows[0])
+        for i, flow in enumerate(flows):
+            flow_avg += (flow * self.weights[i]).astype(np.uint16)
 
         with GeoTiff.from_file(self.avg_flows_fn) as avg_flow_tif:
             tile = avg_flow_tif.get_all_as_tile()
